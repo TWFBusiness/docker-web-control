@@ -44,6 +44,18 @@
               <button id="refresh-containers" class="icon-button" title="Atualizar containers">↻</button>
             </div>
           </div>
+
+          <!-- View Mode Toggle -->
+          <div class="view-mode-toggle">
+            <label id="view-mode-label">Visualização:</label>
+            <button class="view-toggle-button" data-mode="table" id="toggle-table">
+              📊 Tabela Hierárquica
+            </button>
+            <button class="view-toggle-button active" data-mode="cards" id="toggle-cards">
+              🎴 Cards Visuais
+            </button>
+          </div>
+
           <div class="filters">
             <input
               type="search"
@@ -123,6 +135,12 @@
               <button data-action="restart" class="ghost">Reiniciar</button>
             </div>
           </div>
+
+          <!-- Cards View -->
+          <div id="cards-view">
+            <div class="containers-grid" id="cards-container"></div>
+          </div>
+
         </section>
         <section class="panel groups-panel view-panel" data-view="groups">
           <div class="panel-header">
