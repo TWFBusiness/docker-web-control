@@ -15,6 +15,8 @@ const state = {
   currentView: 'containers',
   currentPage: 1,
   itemsPerPage: 5,
+  viewMode: 'cards', // 'table' ou 'cards' - padrão: cards
+  expandedGroups: new Set(), // Grupos expandidos na tabela hierárquica
 };
 
 const dom = {
@@ -60,6 +62,10 @@ const dom = {
   nextPage: document.getElementById("next-page"),
   pageNumbers: document.getElementById("page-numbers"),
   itemsPerPage: document.getElementById("items-per-page"),
+  toggleTable: document.getElementById("toggle-table"),
+  toggleCards: document.getElementById("toggle-cards"),
+  cardsContainer: document.getElementById("cards-container"),
+  cardsView: document.getElementById("cards-view"),
 };
 
 let toastTimer;
@@ -218,6 +224,18 @@ function attachEvents() {
       render();
     }
   });
+
+  // View Mode Toggle
+  if (dom.toggleTable) {
+    dom.toggleTable.addEventListener("click", () => setViewMode('table'));
+  }
+  if (dom.toggleCards) {
+    dom.toggleCards.addEventListener("click", () => setViewMode('cards'));
+  }
+
+  // Carregar preferência salva
+  const savedMode = localStorage.getItem('dockerControlViewMode') || 'cards';
+  setViewMode(savedMode, false);
 }
 
 async function loadAll() {
@@ -350,6 +368,11 @@ function render() {
   renderGroupFilterInfo();
   updateSortIndicators();
   updateViewVisibility();
+
+  // Renderizar cards se estiver no modo cards
+  if (state.viewMode === 'cards') {
+    renderCards();
+  }
 }
 
 function updateSortIndicators() {
@@ -375,7 +398,107 @@ function updateSortIndicators() {
   }
 }
 
+// View Mode Toggle Functions
+function setViewMode(mode, savePreference = true) {
+  state.viewMode = mode;
+
+  if (savePreference) {
+    localStorage.setItem('dockerControlViewMode', mode);
+  }
+
+  // Update button states
+  if (dom.toggleTable) {
+    dom.toggleTable.classList.toggle('active', mode === 'table');
+  }
+  if (dom.toggleCards) {
+    dom.toggleCards.classList.toggle('active', mode === 'cards');
+  }
+
+  // Toggle visibility
+  const tableView = document.getElementById('containers-view');
+  if (tableView) {
+    tableView.style.display = mode === 'table' ? 'block' : 'none';
+  }
+  if (dom.cardsView) {
+    dom.cardsView.style.display = mode === 'cards' ? 'block' : 'none';
+  }
+}
+
+// Hierarchical Table Helper Functions
+function toggleGroupExpansion(groupName) {
+  if (state.expandedGroups.has(groupName)) {
+    state.expandedGroups.delete(groupName);
+  } else {
+    state.expandedGroups.add(groupName);
+  }
+
+  // Update icon
+  const icon = document.getElementById(`expand-icon-${groupName}`);
+  if (icon) {
+    icon.classList.toggle('expanded');
+  }
+
+  // Toggle container rows visibility
+  const containerRows = document.querySelectorAll(`tr.container-row[data-group="${CSS.escape(groupName)}"]`);
+  containerRows.forEach(row => {
+    row.classList.toggle('hidden');
+  });
+}
+
 function renderTable() {
+  // Use hierarchical rendering (v2.0)
+  return renderTableHierarchical();
+}
+
+function renderTableHierarchical() {
+  const allVisibleContainers = getVisibleContainers();
+  dom.tableBody.innerHTML = "";
+
+  if (!allVisibleContainers.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 8;
+    cell.textContent = t("table.empty");
+    row.appendChild(cell);
+    dom.tableBody.appendChild(row);
+    renderPaginationControls(0);
+    return;
+  }
+
+  // Organize containers by group
+  const selectedGroups = invertGroups();
+  const groupedContainers = new Map();
+  const standaloneContainers = [];
+
+  allVisibleContainers.forEach(container => {
+    const containerGroups = selectedGroups.get(container.id) || [];
+    if (containerGroups.length > 0) {
+      // Add to first group
+      const groupName = containerGroups[0];
+      if (!groupedContainers.has(groupName)) {
+        groupedContainers.set(groupName, []);
+      }
+      groupedContainers.get(groupName).push(container);
+    } else {
+      standaloneContainers.push(container);
+    }
+  });
+
+  // Render groups first
+  groupedContainers.forEach((containers, groupName) => {
+    renderGroupRow(groupName, containers, selectedGroups);
+  });
+
+  // Then render standalone containers
+  standaloneContainers.forEach(container => {
+    renderContainerTableRow(container, selectedGroups, null);
+  });
+
+  updateSelectAllState();
+  renderPaginationControls(allVisibleContainers.length);
+}
+
+function renderTableFlat() {
   const allVisibleContainers = getVisibleContainers();
 
   // Apply pagination
@@ -677,6 +800,304 @@ function renderTable() {
 
   // Render pagination controls
   renderPaginationControls(allVisibleContainers.length);
+}
+
+// Hierarchical Table Rendering Functions
+function appendContainerCells(row, container, selectedGroups) {
+  // Name cell
+  const nameCell = document.createElement("td");
+  const nameRow = document.createElement("div");
+  nameRow.className = "name-with-icon";
+  const display = containerDisplay(container);
+
+  if (display.icon || container.icon) {
+    const iconImg = document.createElement("img");
+    iconImg.src = display.icon || container.icon;
+    iconImg.alt = "";
+    iconImg.className = "container-icon";
+    nameRow.appendChild(iconImg);
+  }
+
+  const nameText = document.createElement("strong");
+  nameText.textContent = display.main;
+  nameRow.appendChild(nameText);
+
+  if (display.original) {
+    const original = document.createElement("span");
+    original.className = "meta-line small";
+    original.textContent = `(${display.original})`;
+    nameRow.appendChild(original);
+  }
+
+  nameCell.appendChild(nameRow);
+  const projectLine = document.createElement("div");
+  projectLine.className = "meta-line";
+  projectLine.textContent = container.project || "";
+  nameCell.appendChild(projectLine);
+  row.appendChild(nameCell);
+
+  // Image cell
+  const imageCell = document.createElement("td");
+  imageCell.textContent = container.image || "—";
+  row.appendChild(imageCell);
+
+  // Status cell
+  const statusCell = document.createElement("td");
+  const statusPill = document.createElement("span");
+  statusPill.className = `status-pill status-${container.state === "running" ? "running" : "exited"}`;
+  statusPill.textContent = container.state === "running" ? t("status.running") : t("status.stopped");
+  statusCell.appendChild(statusPill);
+  row.appendChild(statusCell);
+
+  // Ports cell
+  const portsCell = document.createElement("td");
+  portsCell.textContent = container.ports || "—";
+  row.appendChild(portsCell);
+
+  // Groups cell
+  const groupsCell = document.createElement("td");
+  const containerGroups = selectedGroups.get(container.id) || [];
+  if (containerGroups.length) {
+    containerGroups.forEach((g) => {
+      const groupLink = document.createElement("button");
+      groupLink.className = "group-link";
+      groupLink.textContent = groupLabel(g);
+      groupLink.addEventListener("click", () => {
+        state.activeGroup = g;
+        render();
+      });
+      groupsCell.appendChild(groupLink);
+    });
+  } else {
+    groupsCell.textContent = "—";
+  }
+  row.appendChild(groupsCell);
+
+  // Auto-start cell
+  const autostartCell = renderAutostartCell(container, selectedGroups);
+  row.appendChild(autostartCell);
+
+  // Actions cell
+  const actionsCell = document.createElement("td");
+  const actions = container.state === "running" ? ["stop", "restart"] : ["start", "restart"];
+  actions.forEach((action) => {
+    const button = document.createElement("button");
+    button.className = "ghost small";
+    button.textContent =
+      action === "start"
+        ? t("actions.start")
+        : action === "stop"
+        ? t("actions.stop")
+        : t("actions.restart");
+    button.addEventListener("click", () => handleAction(container.id, action));
+    actionsCell.appendChild(button);
+  });
+  row.appendChild(actionsCell);
+}
+
+function renderGroupRow(groupName, containers, selectedGroups) {
+  const row = document.createElement('tr');
+  row.className = 'group-row';
+  row.onclick = () => toggleGroupExpansion(groupName);
+
+  // Checkbox cell
+  const checkboxCell = document.createElement('td');
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.onclick = (e) => e.stopPropagation();
+  checkboxCell.appendChild(checkbox);
+  row.appendChild(checkboxCell);
+
+  // Group header cell (colspan)
+  const headerCell = document.createElement('td');
+  headerCell.colSpan = 7;
+
+  const headerDiv = document.createElement('div');
+  headerDiv.className = 'group-row-header';
+
+  // Expand icon
+  const expandIcon = document.createElement('span');
+  expandIcon.className = state.expandedGroups.has(groupName) ? 'expand-icon expanded' : 'expand-icon';
+  expandIcon.id = `expand-icon-${groupName}`;
+  expandIcon.textContent = '▶';
+  headerDiv.appendChild(expandIcon);
+
+  // Group icon
+  const aliasMeta = state.groupAliases?.[groupName];
+  const groupIconAlias = aliasMeta && typeof aliasMeta === "object" ? aliasMeta.icon : "";
+  const containerMap = buildContainerMap();
+  const containerIds = state.groups[groupName] || [];
+  const groupIconContainer = containerIds
+    .map((id) => containerMap.get(id))
+    .find((c) => c && c.icon)?.icon;
+  const groupIcon = groupIconAlias || groupIconContainer;
+
+  if (groupIcon) {
+    const iconImg = document.createElement('img');
+    iconImg.src = groupIcon;
+    iconImg.className = 'group-row-icon';
+    iconImg.alt = '';
+    headerDiv.appendChild(iconImg);
+  }
+
+  // Group name
+  const displayName = groupLabel(groupName);
+  const nameSpan = document.createElement('strong');
+  nameSpan.className = 'group-row-name';
+  nameSpan.textContent = displayName;
+  headerDiv.appendChild(nameSpan);
+
+  // Container count badge
+  const badge = document.createElement('span');
+  badge.className = 'group-row-badge';
+  badge.textContent = `${containers.length} container${containers.length > 1 ? 's' : ''}`;
+  headerDiv.appendChild(badge);
+
+  // Auto-start button
+  const isGroupEnabled = state.autostart.groups.includes(groupName);
+  const autostartBtn = document.createElement('button');
+  autostartBtn.className = `group-autostart-toggle group-row-autostart ${isGroupEnabled ? 'enabled' : 'disabled'}`;
+  autostartBtn.textContent = isGroupEnabled ? 'Auto-start: ON' : 'Auto-start: OFF';
+  autostartBtn.title = 'Clique para alterar auto-start do grupo';
+  autostartBtn.onclick = async (e) => {
+    e.stopPropagation();
+    await toggleGroupAutostart(groupName, containers);
+  };
+  headerDiv.appendChild(autostartBtn);
+
+  // Actions
+  const actionsDiv = document.createElement('div');
+  actionsDiv.className = 'group-row-actions';
+
+  const startBtn = document.createElement('button');
+  startBtn.className = 'ghost small';
+  startBtn.textContent = '▶ Iniciar';
+  startBtn.onclick = (e) => {
+    e.stopPropagation();
+    handleGroupAction(groupName, 'start');
+  };
+  actionsDiv.appendChild(startBtn);
+
+  const stopBtn = document.createElement('button');
+  stopBtn.className = 'ghost small';
+  stopBtn.textContent = '■ Parar';
+  stopBtn.onclick = (e) => {
+    e.stopPropagation();
+    handleGroupAction(groupName, 'stop');
+  };
+  actionsDiv.appendChild(stopBtn);
+
+  const restartBtn = document.createElement('button');
+  restartBtn.className = 'ghost small';
+  restartBtn.textContent = '⟳ Reiniciar';
+  restartBtn.onclick = (e) => {
+    e.stopPropagation();
+    handleGroupAction(groupName, 'restart');
+  };
+  actionsDiv.appendChild(restartBtn);
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'ghost small danger';
+  deleteBtn.textContent = '🗑 Excluir';
+  deleteBtn.onclick = (e) => {
+    e.stopPropagation();
+    deleteGroup(groupName);
+  };
+  actionsDiv.appendChild(deleteBtn);
+
+  headerDiv.appendChild(actionsDiv);
+  headerCell.appendChild(headerDiv);
+  row.appendChild(headerCell);
+
+  dom.tableBody.appendChild(row);
+
+  // Render containers in group
+  containers.forEach(container => {
+    renderContainerTableRow(container, selectedGroups, groupName);
+  });
+}
+
+async function toggleGroupAutostart(groupName, containers) {
+  const currentEnabled = state.autostart.groups.includes(groupName);
+  const previousGroups = [...state.autostart.groups];
+  const previousPolicies = {};
+
+  containers.forEach(c => {
+    previousPolicies[c.id] = c.restart_policy || 'no';
+  });
+
+  // Update state (optimistic)
+  if (currentEnabled) {
+    state.autostart.groups = state.autostart.groups.filter((g) => g !== groupName);
+  } else {
+    state.autostart.groups.push(groupName);
+  }
+  const newEnabled = !currentEnabled;
+
+  try {
+    await saveAutostart();
+    // Adjust restart policy for containers
+    if (containers.length) {
+      const newPolicy = newEnabled ? 'unless-stopped' : 'no';
+      await Promise.all(containers.map((c) => setRestartPolicy(c.id, newPolicy)));
+      containers.forEach((c) => {
+        c.restart_policy = newPolicy;
+      });
+    }
+    showToast(`Auto-start do grupo ${newEnabled ? 'habilitado' : 'desabilitado'}`);
+    render(); // Re-render to update button state
+  } catch (error) {
+    showToast(error.message || 'Erro ao salvar', true);
+    // Revert
+    state.autostart.groups = previousGroups;
+    if (containers.length) {
+      await Promise.all(
+        containers.map((c) =>
+          setRestartPolicy(c.id, previousPolicies[c.id] || 'no').catch(() => null)
+        )
+      );
+      containers.forEach((c) => {
+        c.restart_policy = previousPolicies[c.id] || c.restart_policy;
+      });
+    }
+    render();
+  }
+}
+
+function renderContainerTableRow(container, selectedGroups, groupName) {
+  const row = document.createElement("tr");
+  row.className = groupName ? 'container-row grouped' : 'container-row standalone';
+
+  if (groupName) {
+    row.setAttribute('data-group', groupName);
+    if (!state.expandedGroups.has(groupName)) {
+      row.classList.add('hidden');
+    }
+  }
+
+  // Use existing container row rendering logic from renderTableFlat
+  // We'll copy the relevant parts here
+
+  const selectCell = document.createElement("td");
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = state.selected.has(container.id);
+  checkbox.addEventListener("change", (event) => {
+    if (event.target.checked) {
+      state.selected.add(container.id);
+    } else {
+      state.selected.delete(container.id);
+    }
+    renderSelectionInfo();
+    updateSelectAllState();
+  });
+  selectCell.appendChild(checkbox);
+  row.appendChild(selectCell);
+
+  // For brevity, we'll call a helper to render the rest
+  appendContainerCells(row, container, selectedGroups);
+
+  dom.tableBody.appendChild(row);
 }
 
 function renderPaginationControls(totalItems) {
@@ -1054,6 +1475,301 @@ function renderGroups() {
     }
     dom.groupsList.appendChild(card);
   });
+}
+
+// ============================================
+// Cards View Rendering (v2.0)
+// ============================================
+
+function renderCards() {
+  if (!dom.cardsContainer) return;
+
+  dom.cardsContainer.innerHTML = '';
+
+  const allVisibleContainers = getVisibleContainers();
+  if (!allVisibleContainers.length) {
+    const empty = document.createElement('div');
+    empty.style.textAlign = 'center';
+    empty.style.padding = '2rem';
+    empty.style.opacity = '0.6';
+    empty.textContent = 'Nenhum container encontrado';
+    dom.cardsContainer.appendChild(empty);
+    return;
+  }
+
+  // Organize containers by group
+  const selectedGroups = invertGroups();
+  const groupedIds = new Set();
+
+  // Renderizar grupos como cards
+  Object.keys(state.groups).forEach(groupName => {
+    const containerIds = state.groups[groupName] || [];
+    if (containerIds.length === 0) return;
+
+    const groupCard = createGroupCard(groupName, containerIds);
+    dom.cardsContainer.appendChild(groupCard);
+
+    // Mark containers as grouped
+    containerIds.forEach(id => groupedIds.add(id));
+  });
+
+  // Renderizar containers sem grupo
+  const standaloneContainers = allVisibleContainers.filter(c => !groupedIds.has(c.id));
+  standaloneContainers.forEach(container => {
+    const card = createStandaloneCard(container);
+    dom.cardsContainer.appendChild(card);
+  });
+}
+
+function createGroupCard(groupName, containerIds) {
+  const card = document.createElement('div');
+  card.className = 'group-card-glass';
+
+  const aliasMeta = state.groupAliases?.[groupName];
+  const displayName = groupLabel(groupName);
+
+  // Ícone do grupo: preferir ícone definido no alias, senão primeiro container com ícone
+  const groupIconAlias = aliasMeta && typeof aliasMeta === "object" ? aliasMeta.icon : "";
+  const containerMap = buildContainerMap();
+  const groupIconContainer = containerIds
+    .map((id) => containerMap.get(id))
+    .find((c) => c && c.icon)?.icon;
+  const groupIcon = groupIconAlias || groupIconContainer;
+
+  const isGroupEnabled = state.autostart.groups.includes(groupName);
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'group-card-glass-header';
+
+  if (groupIcon) {
+    const icon = document.createElement('img');
+    icon.src = groupIcon;
+    icon.className = 'group-card-glass-icon';
+    icon.alt = '';
+    header.appendChild(icon);
+  }
+
+  const info = document.createElement('div');
+  info.className = 'group-card-glass-info';
+
+  const nameEl = document.createElement('div');
+  nameEl.className = 'group-card-glass-name';
+  nameEl.textContent = displayName;
+  info.appendChild(nameEl);
+
+  const badge = document.createElement('span');
+  badge.className = 'group-card-glass-badge';
+  badge.textContent = `${containerIds.length} container${containerIds.length > 1 ? 's' : ''}`;
+  info.appendChild(badge);
+
+  header.appendChild(info);
+
+  // Auto-start button (clicável, igual à página de Grupos)
+  const autostartButton = document.createElement('button');
+  autostartButton.className = `group-autostart-toggle ${isGroupEnabled ? 'enabled' : 'disabled'}`;
+  autostartButton.textContent = isGroupEnabled ? 'Auto-start: Habilitado' : 'Auto-start: Desabilitado';
+  autostartButton.title = 'Clique para alterar auto-start do grupo';
+  autostartButton.addEventListener('click', async (event) => {
+    const currentEnabled = state.autostart.groups.includes(groupName);
+    const button = event.target;
+    const previousGroups = [...state.autostart.groups];
+    const previousPolicies = {};
+    containerIds.forEach((id) => {
+      const c = containerMap.get(id);
+      previousPolicies[id] = (c && c.restart_policy) || 'no';
+    });
+
+    // Atualizar estado (optimista)
+    if (currentEnabled) {
+      state.autostart.groups = state.autostart.groups.filter((g) => g !== groupName);
+    } else {
+      state.autostart.groups.push(groupName);
+    }
+    const newEnabled = !currentEnabled;
+    button.disabled = true;
+    button.textContent = newEnabled ? 'Auto-start: Habilitado' : 'Auto-start: Desabilitado';
+    button.className = `group-autostart-toggle ${newEnabled ? 'enabled' : 'disabled'}`;
+
+    try {
+      await saveAutostart();
+      // Ajustar restart policy dos containers do grupo para refletir no boot
+      if (containerIds.length) {
+        const newPolicy = newEnabled ? 'unless-stopped' : 'no';
+        await Promise.all(containerIds.map((id) => setRestartPolicy(id, newPolicy)));
+        containerIds.forEach((id) => {
+          const c = containerMap.get(id);
+          if (c) c.restart_policy = newPolicy;
+        });
+      }
+      showToast(`Auto-start do grupo ${newEnabled ? 'habilitado' : 'desabilitado'}`);
+    } catch (error) {
+      showToast(error.message || 'Erro ao salvar', true);
+      // Reverter grupo e restart policy (best effort)
+      state.autostart.groups = previousGroups;
+      if (containerIds.length) {
+        const revertPolicy = currentEnabled ? 'unless-stopped' : 'no';
+        await Promise.all(
+          containerIds.map((id) =>
+            setRestartPolicy(id, previousPolicies[id] || revertPolicy).catch(() => null)
+          )
+        );
+        containerIds.forEach((id) => {
+          const c = containerMap.get(id);
+          if (c) c.restart_policy = previousPolicies[id] || c.restart_policy;
+        });
+      }
+      button.textContent = currentEnabled ? 'Auto-start: Habilitado' : 'Auto-start: Desabilitado';
+      button.className = `group-autostart-toggle ${currentEnabled ? 'enabled' : 'disabled'}`;
+    }
+    button.disabled = false;
+  });
+  header.appendChild(autostartButton);
+
+  card.appendChild(header);
+
+  // Actions
+  const actions = document.createElement('div');
+  actions.className = 'group-card-glass-actions';
+
+  const startBtn = createButton('▶ Iniciar Todos', 'ghost small', () => handleGroupAction(groupName, 'start'));
+  const stopBtn = createButton('■ Parar Todos', 'ghost small', () => handleGroupAction(groupName, 'stop'));
+  const restartBtn = createButton('⟳ Reiniciar', 'ghost small', () => handleGroupAction(groupName, 'restart'));
+  const deleteBtn = createButton('🗑 Excluir', 'ghost small', () => deleteGroup(groupName));
+
+  actions.appendChild(startBtn);
+  actions.appendChild(stopBtn);
+  actions.appendChild(restartBtn);
+  actions.appendChild(deleteBtn);
+  card.appendChild(actions);
+
+  // Container list
+  const list = document.createElement('div');
+  list.className = 'container-list-glass';
+
+  containerIds.forEach(cid => {
+    const container = containerMap.get(cid);
+    if (!container) return;
+
+    const item = createContainerItem(container);
+    list.appendChild(item);
+  });
+
+  card.appendChild(list);
+  return card;
+}
+
+function createContainerItem(container) {
+  const item = document.createElement('div');
+  item.className = 'container-item-glass';
+
+  const display = containerDisplay(container);
+
+  // Icons removed - only shown on group names, not individual containers
+
+  const details = document.createElement('div');
+  details.className = 'container-item-glass-details';
+
+  const nameEl = document.createElement('div');
+  nameEl.className = 'container-item-glass-name';
+  nameEl.innerHTML = `${display.main} <span class="status-pill status-${container.state === 'running' ? 'running' : 'exited'}">${container.state}</span>`;
+  details.appendChild(nameEl);
+
+  const meta = document.createElement('div');
+  meta.className = 'container-item-glass-meta';
+  meta.textContent = `${container.image} • Port: ${container.ports || '—'}`;
+  details.appendChild(meta);
+
+  item.appendChild(details);
+
+  // Actions
+  const actions = document.createElement('div');
+  actions.className = 'container-item-glass-actions';
+
+  const isRunning = container.state === 'running';
+  if (isRunning) {
+    actions.appendChild(createButton('■', 'ghost small', () => handleAction(container.id, 'stop')));
+    actions.appendChild(createButton('⟳', 'ghost small', () => handleAction(container.id, 'restart')));
+  } else {
+    actions.appendChild(createButton('▶', 'ghost small', () => handleAction(container.id, 'start')));
+  }
+
+  item.appendChild(actions);
+  return item;
+}
+
+function createStandaloneCard(container) {
+  const card = document.createElement('div');
+  card.className = 'group-card-glass';
+
+  const display = containerDisplay(container);
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'group-card-glass-header';
+
+  if (display.icon || container.icon) {
+    const icon = document.createElement('img');
+    icon.src = display.icon || container.icon;
+    icon.className = 'group-card-glass-icon';
+    icon.alt = '';
+    header.appendChild(icon);
+  }
+
+  const info = document.createElement('div');
+  info.className = 'group-card-glass-info';
+
+  const nameEl = document.createElement('div');
+  nameEl.className = 'group-card-glass-name';
+  nameEl.textContent = display.main;
+  info.appendChild(nameEl);
+
+  const statusBadge = document.createElement('span');
+  statusBadge.className = `status-pill status-${container.state === 'running' ? 'running' : 'exited'}`;
+  statusBadge.textContent = container.state;
+  info.appendChild(statusBadge);
+
+  header.appendChild(info);
+  card.appendChild(header);
+
+  // Details
+  const details = document.createElement('div');
+  details.style.padding = '1rem';
+
+  const imageLine = document.createElement('div');
+  imageLine.style.marginBottom = '0.5rem';
+  imageLine.innerHTML = `<strong>Image:</strong> ${container.image}`;
+  details.appendChild(imageLine);
+
+  const portsLine = document.createElement('div');
+  portsLine.style.marginBottom = '0.5rem';
+  portsLine.innerHTML = `<strong>Ports:</strong> ${container.ports || '—'}`;
+  details.appendChild(portsLine);
+
+  card.appendChild(details);
+
+  // Actions
+  const actions = document.createElement('div');
+  actions.className = 'group-card-glass-actions';
+
+  const isRunning = container.state === 'running';
+  if (isRunning) {
+    actions.appendChild(createButton('■ Parar', 'ghost small', () => handleAction(container.id, 'stop')));
+    actions.appendChild(createButton('⟳ Reiniciar', 'ghost small', () => handleAction(container.id, 'restart')));
+  } else {
+    actions.appendChild(createButton('▶ Iniciar', 'ghost small', () => handleAction(container.id, 'start')));
+  }
+
+  card.appendChild(actions);
+  return card;
+}
+
+function createButton(text, className, onClick) {
+  const button = document.createElement('button');
+  button.textContent = text;
+  button.className = className;
+  button.addEventListener('click', onClick);
+  return button;
 }
 
 function renderGroupActionRow(groupName, hasAvailable) {
