@@ -959,6 +959,23 @@ function renderGroupRow(groupName, containers, selectedGroups) {
   nameSpan.textContent = displayName;
   headerDiv.appendChild(nameSpan);
 
+  // Edit button (pencil icon)
+  const editBtn = document.createElement('button');
+  editBtn.type = 'button';
+  editBtn.className = 'icon-button';
+  editBtn.title = 'Editar apelido e ícone';
+  editBtn.textContent = '✎';
+  editBtn.onclick = (e) => {
+    e.stopPropagation();
+    const aliasFormElement = document.getElementById(`group-alias-form-${CSS.escape(groupName)}`);
+    if (aliasFormElement) {
+      aliasFormElement.classList.add('visible');
+      const inputElement = aliasFormElement.querySelector('input[type="text"]');
+      if (inputElement) inputElement.focus();
+    }
+  };
+  headerDiv.appendChild(editBtn);
+
   // Container count badge
   const badge = document.createElement('span');
   badge.className = 'group-row-badge';
@@ -1022,6 +1039,144 @@ function renderGroupRow(groupName, containers, selectedGroups) {
   row.appendChild(headerCell);
 
   dom.tableBody.appendChild(row);
+
+  // Add alias edit form row (hidden by default)
+  const formRow = document.createElement('tr');
+  formRow.className = 'group-alias-form-row';
+  const formCell = document.createElement('td');
+  formCell.colSpan = 8;
+
+  const aliasForm = document.createElement('form');
+  aliasForm.className = 'alias-form';
+  aliasForm.id = `group-alias-form-${CSS.escape(groupName)}`;
+
+  // Alias input row
+  const aliasInput = document.createElement('input');
+  aliasInput.type = 'text';
+  aliasInput.placeholder = 'Apelido (opcional)';
+  aliasInput.value = aliasMeta && typeof aliasMeta === 'object' ? aliasMeta.alias || '' : aliasMeta || '';
+
+  const aliasRow = document.createElement('div');
+  aliasRow.className = 'icon-row';
+
+  const aliasSpacer = document.createElement('button');
+  aliasSpacer.type = 'button';
+  aliasSpacer.className = 'ghost small upload-placeholder';
+  aliasSpacer.textContent = '📤 Upload';
+  aliasSpacer.tabIndex = -1;
+  aliasSpacer.setAttribute('aria-hidden', 'true');
+
+  aliasRow.appendChild(aliasInput);
+  aliasRow.appendChild(aliasSpacer);
+
+  // Icon input row
+  const iconInput = document.createElement('input');
+  iconInput.type = 'text';
+  iconInput.placeholder = 'Ícone (URL) ex: http://icons.casaos.local/...';
+  iconInput.value = aliasMeta && typeof aliasMeta === 'object' ? aliasMeta.icon || '' : '';
+
+  const iconContainer = document.createElement('div');
+  iconContainer.className = 'icon-row';
+
+  // Upload button
+  const uploadButton = document.createElement('button');
+  uploadButton.type = 'button';
+  uploadButton.className = 'ghost small';
+  uploadButton.textContent = '📤 Upload';
+  uploadButton.title = 'Upload icon image';
+
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = 'image/png,image/jpeg,image/jpg,image/gif,image/svg+xml,image/webp,image/x-icon';
+  fileInput.style.display = 'none';
+
+  uploadButton.addEventListener('click', () => fileInput.click());
+
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 5 * 1024 * 1024) {
+      showToast('Arquivo muito grande. Máximo: 5MB', true);
+      return;
+    }
+
+    try {
+      uploadButton.disabled = true;
+      uploadButton.textContent = '⏳ Enviando...';
+
+      const formData = new FormData();
+      formData.append('icon', file);
+
+      const response = await fetch('/api/upload-icon', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Erro ao fazer upload');
+      }
+
+      iconInput.value = data.url;
+      showToast('Ícone enviado com sucesso!', false);
+    } catch (error) {
+      showToast(error.message || 'Erro ao fazer upload do ícone', true);
+    } finally {
+      uploadButton.disabled = false;
+      uploadButton.textContent = '📤 Upload';
+      fileInput.value = '';
+    }
+  });
+
+  iconContainer.appendChild(iconInput);
+  iconContainer.appendChild(uploadButton);
+  iconContainer.appendChild(fileInput);
+
+  // Action buttons
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'submit';
+  saveBtn.className = 'ghost small';
+  saveBtn.textContent = 'Salvar';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'ghost small';
+  cancelBtn.textContent = 'Cancelar';
+
+  const actionsRow = document.createElement('div');
+  actionsRow.className = 'alias-actions';
+  actionsRow.appendChild(saveBtn);
+  actionsRow.appendChild(cancelBtn);
+
+  aliasForm.appendChild(aliasRow);
+  aliasForm.appendChild(iconContainer);
+  aliasForm.appendChild(actionsRow);
+
+  // Event listeners
+  cancelBtn.addEventListener('click', () => {
+    const meta = state.groupAliases[groupName];
+    aliasInput.value = meta && typeof meta === 'object' ? meta.alias || '' : meta || '';
+    iconInput.value = meta && typeof meta === 'object' ? meta.icon || '' : '';
+    aliasForm.classList.remove('visible');
+  });
+
+  aliasForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const trimmed = aliasInput.value.trim();
+    const iconTrimmed = iconInput.value.trim();
+    try {
+      await renameGroup(groupName, trimmed, iconTrimmed);
+      aliasForm.classList.remove('visible');
+    } catch (error) {
+      showToast(error.message || 'Erro ao renomear grupo.', true);
+    }
+  });
+
+  formCell.appendChild(aliasForm);
+  formRow.appendChild(formCell);
+  dom.tableBody.appendChild(formRow);
 
   // Render containers in group
   containers.forEach(container => {

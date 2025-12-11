@@ -1436,6 +1436,16 @@ tr.group-row td {
   padding: 1rem;
 }
 
+/* Group alias edit form row */
+tr.group-alias-form-row {
+  background: rgba(13, 31, 44, 0.6);
+  border-left: 3px solid rgba(34, 211, 238, 0.4);
+}
+
+tr.group-alias-form-row td {
+  padding: 0.5rem 1rem 0.5rem 3rem;
+}
+
 .group-row-header {
   display: flex;
   align-items: center;
