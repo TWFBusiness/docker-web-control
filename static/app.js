@@ -66,6 +66,8 @@ const dom = {
   toggleCards: document.getElementById("toggle-cards"),
   cardsContainer: document.getElementById("cards-container"),
   cardsView: document.getElementById("cards-view"),
+  newFromDockerfile: document.getElementById("new-from-dockerfile"),
+  newFromCommand: document.getElementById("new-from-command"),
 };
 
 let toastTimer;
@@ -225,17 +227,16 @@ function attachEvents() {
     }
   });
 
-  // View Mode Toggle
-  if (dom.toggleTable) {
-    dom.toggleTable.addEventListener("click", () => setViewMode('table'));
-  }
-  if (dom.toggleCards) {
-    dom.toggleCards.addEventListener("click", () => setViewMode('cards'));
-  }
+  // Bloquear na visualização de cards
+  setViewMode('cards', true);
+  localStorage.setItem('dockerControlViewMode', 'cards');
 
-  // Carregar preferência salva
-  const savedMode = localStorage.getItem('dockerControlViewMode') || 'cards';
-  setViewMode(savedMode, false);
+  if (dom.newFromDockerfile) {
+    dom.newFromDockerfile.addEventListener("click", openNewContainerFromDockerfile);
+  }
+  if (dom.newFromCommand) {
+    dom.newFromCommand.addEventListener("click", openNewContainerFromCommand);
+  }
 }
 
 async function loadAll() {
@@ -362,7 +363,12 @@ async function saveContainerAlias(containerId, aliasValue, iconValue) {
 }
 
 function render() {
-  renderTable();
+  if (state.viewMode === 'table') {
+    renderTable();
+  } else {
+    // limpar tabela para evitar resíduos ao trocar
+    dom.tableBody.innerHTML = "";
+  }
   renderSelectionInfo();
   renderGroups();
   renderGroupFilterInfo();
@@ -400,6 +406,10 @@ function updateSortIndicators() {
 
 // View Mode Toggle Functions
 function setViewMode(mode, savePreference = true) {
+  if (mode !== 'cards') {
+    mode = 'cards';
+  }
+  const modeChanged = state.viewMode !== mode;
   state.viewMode = mode;
 
   if (savePreference) {
@@ -433,6 +443,11 @@ function setViewMode(mode, savePreference = true) {
   if (dom.cardsView) {
     dom.cardsView.style.display = mode === 'cards' ? 'block' : 'none';
   }
+
+  // Re-render when the mode actually changes to ensure the target view is populated.
+  if (modeChanged) {
+    render();
+  }
 }
 
 // Hierarchical Table Helper Functions
@@ -457,6 +472,7 @@ function toggleGroupExpansion(groupName) {
 }
 
 function renderTable() {
+  if (state.viewMode !== 'table') return;
   // Use hierarchical rendering (v2.0)
   return renderTableHierarchical();
 }
@@ -789,20 +805,28 @@ function renderTableFlat() {
 
       const actionsCell = document.createElement("td");
       actionsCell.className = "actions-cell";
-      const isRunning = container.state === "running";
-      const actions = isRunning ? ["stop", "restart"] : ["start"];
-      actions.forEach((action) => {
+      getContainerActions(container).forEach((action) => {
         const button = document.createElement("button");
-        button.className = "ghost";
-        button.textContent =
-          action === "start"
-            ? t("actions.start")
-            : action === "stop"
-            ? t("actions.stop")
-            : t("actions.restart");
+        button.className = `ghost${action === "delete" ? " danger" : ""}`;
+        button.textContent = actionLabel(action);
         button.addEventListener("click", () => handleAction(container.id, action));
         actionsCell.appendChild(button);
       });
+      const exportBtn = document.createElement("button");
+      exportBtn.className = "ghost small";
+      exportBtn.textContent = "Exportar";
+      exportBtn.addEventListener("click", () =>
+        exportContainer(container.id, false, container.name).catch((err) =>
+          showToast(err.message || "Erro ao exportar", true)
+        )
+      );
+      actionsCell.appendChild(exportBtn);
+
+      const editBtn = document.createElement("button");
+      editBtn.className = "ghost small";
+      editBtn.textContent = "Editar Dockerfile";
+      editBtn.addEventListener("click", () => openDockerfileEditor(container.id, container.name));
+      actionsCell.appendChild(editBtn);
       row.appendChild(actionsCell);
       dom.tableBody.appendChild(row);
     });
@@ -834,6 +858,9 @@ function appendContainerCells(row, container, selectedGroups) {
   nameText.textContent = display.main;
   nameRow.appendChild(nameText);
 
+  const aliasEditor = createAliasEditor(container, () => render());
+  nameRow.appendChild(aliasEditor.button);
+
   if (display.original) {
     const original = document.createElement("span");
     original.className = "meta-line small";
@@ -846,6 +873,7 @@ function appendContainerCells(row, container, selectedGroups) {
   projectLine.className = "meta-line";
   projectLine.textContent = container.project || "";
   nameCell.appendChild(projectLine);
+  nameCell.appendChild(aliasEditor.form);
   row.appendChild(nameCell);
 
   // Image cell
@@ -891,19 +919,30 @@ function appendContainerCells(row, container, selectedGroups) {
 
   // Actions cell
   const actionsCell = document.createElement("td");
-  const actions = container.state === "running" ? ["stop", "restart"] : ["start", "restart"];
-  actions.forEach((action) => {
+  getContainerActions(container).forEach((action) => {
     const button = document.createElement("button");
-    button.className = "ghost small";
-    button.textContent =
-      action === "start"
-        ? t("actions.start")
-        : action === "stop"
-        ? t("actions.stop")
-        : t("actions.restart");
+    button.className = `ghost small${action === "delete" ? " danger" : ""}`;
+    button.textContent = actionLabel(action);
     button.addEventListener("click", () => handleAction(container.id, action));
     actionsCell.appendChild(button);
   });
+
+  const exportBtn = document.createElement("button");
+  exportBtn.className = "ghost small";
+  exportBtn.textContent = "Exportar";
+  exportBtn.addEventListener("click", () =>
+    exportContainer(container.id, false, container.name).catch((err) =>
+      showToast(err.message || "Erro ao exportar", true)
+    )
+  );
+  actionsCell.appendChild(exportBtn);
+
+  const editBtn = document.createElement("button");
+  editBtn.className = "ghost small";
+  editBtn.textContent = "Editar Dockerfile";
+  editBtn.addEventListener("click", () => openDockerfileEditor(container.id, container.name));
+  actionsCell.appendChild(editBtn);
+
   row.appendChild(actionsCell);
 }
 
@@ -998,41 +1037,33 @@ function renderGroupRow(groupName, containers, selectedGroups) {
   const actionsDiv = document.createElement('div');
   actionsDiv.className = 'group-row-actions';
 
-  const startBtn = document.createElement('button');
-  startBtn.className = 'ghost small';
-  startBtn.textContent = '▶ Iniciar';
-  startBtn.onclick = (e) => {
-    e.stopPropagation();
-    handleGroupAction(groupName, 'start');
-  };
-  actionsDiv.appendChild(startBtn);
+  const hasContainers = containers && containers.length > 0;
+  getGroupActions(groupName).forEach((action) => {
+    const btn = document.createElement('button');
+    btn.className = `ghost small${action === 'delete' ? ' danger' : ''}`;
+    btn.textContent = groupActionLabel(action);
+    if (action !== 'delete' && !hasContainers) {
+      btn.disabled = true;
+    }
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      if (action === 'delete') {
+        deleteGroup(groupName);
+      } else {
+        handleGroupAction(groupName, action);
+      }
+    };
+    actionsDiv.appendChild(btn);
+  });
 
-  const stopBtn = document.createElement('button');
-  stopBtn.className = 'ghost small';
-  stopBtn.textContent = '■ Parar';
-  stopBtn.onclick = (e) => {
+  const exportBtn = document.createElement('button');
+  exportBtn.className = 'ghost small';
+  exportBtn.textContent = '⬇ Exportar';
+  exportBtn.onclick = (e) => {
     e.stopPropagation();
-    handleGroupAction(groupName, 'stop');
+    exportGroup(groupName, false).catch((err) => showToast(err.message || "Erro ao exportar", true));
   };
-  actionsDiv.appendChild(stopBtn);
-
-  const restartBtn = document.createElement('button');
-  restartBtn.className = 'ghost small';
-  restartBtn.textContent = '⟳ Reiniciar';
-  restartBtn.onclick = (e) => {
-    e.stopPropagation();
-    handleGroupAction(groupName, 'restart');
-  };
-  actionsDiv.appendChild(restartBtn);
-
-  const deleteBtn = document.createElement('button');
-  deleteBtn.className = 'ghost small danger';
-  deleteBtn.textContent = '🗑 Excluir';
-  deleteBtn.onclick = (e) => {
-    e.stopPropagation();
-    deleteGroup(groupName);
-  };
-  actionsDiv.appendChild(deleteBtn);
+  actionsDiv.appendChild(exportBtn);
 
   headerDiv.appendChild(actionsDiv);
   headerCell.appendChild(headerDiv);
@@ -1655,26 +1686,25 @@ function renderCards() {
 
   // Get all containers including grouped ones, with filters applied
   const allContainersWithFilters = getVisibleContainers(true);
+  const selectedGroups = invertGroups();
+  const orderedGroups = computeOrderedGroups(allContainersWithFilters, selectedGroups);
 
   // Get standalone containers only (for later)
   const standaloneContainersOnly = getVisibleContainers(false);
 
   // Organize containers by group
-  const selectedGroups = invertGroups();
   const groupedIds = new Set();
   const visibleContainerIds = new Set(allContainersWithFilters.map(c => c.id));
 
   let hasVisibleContent = false;
 
   // Renderizar grupos como cards (apenas grupos com containers visíveis após filtros)
-  Object.keys(state.groups).forEach(groupName => {
-    const containerIds = state.groups[groupName] || [];
-    if (containerIds.length === 0) return;
+  orderedGroups.forEach(groupName => {
+    // Containers visíveis deste grupo na mesma ordem da tabela (já ordenados em allContainersWithFilters)
+    const visibleGroupContainerIds = allContainersWithFilters
+      .filter(c => (selectedGroups.get(c.id) || []).includes(groupName))
+      .map(c => c.id);
 
-    // Filter group containers to only show visible ones (after filters)
-    const visibleGroupContainerIds = containerIds.filter(id => visibleContainerIds.has(id));
-
-    // Only render group if it has visible containers
     if (visibleGroupContainerIds.length === 0) return;
 
     const groupCard = createGroupCard(groupName, visibleGroupContainerIds);
@@ -1682,12 +1712,12 @@ function renderCards() {
     hasVisibleContent = true;
 
     // Mark containers as grouped
-    containerIds.forEach(id => groupedIds.add(id));
+    visibleGroupContainerIds.forEach(id => groupedIds.add(id));
   });
 
   // Renderizar containers sem grupo
   standaloneContainersOnly.forEach(container => {
-    const card = createStandaloneCard(container);
+    const card = createStandaloneCard(container, selectedGroups);
     dom.cardsContainer.appendChild(card);
     hasVisibleContent = true;
   });
@@ -1703,9 +1733,39 @@ function renderCards() {
   }
 }
 
+function computeGroupStatus(containerIds) {
+  const containerMap = buildContainerMap();
+  let running = 0;
+  let total = 0;
+
+  containerIds.forEach((id) => {
+    const c = containerMap.get(id);
+    if (!c) return;
+    total += 1;
+    if ((c.state || "").toLowerCase() === "running") {
+      running += 1;
+    }
+  });
+
+  if (total === 0) {
+    return { running: 0, total: 0, label: "Sem containers", className: "status-exited" };
+  }
+
+  if (running === total) {
+    return { running, total, label: `${total}/${total} rodando`, className: "status-running" };
+  }
+
+  if (running === 0) {
+    return { running, total, label: `Parados (${total})`, className: "status-exited" };
+  }
+
+  return { running, total, label: `${running}/${total} rodando`, className: "status-mixed" };
+}
+
 function createGroupCard(groupName, containerIds) {
   const card = document.createElement('div');
   card.className = 'group-card-glass';
+  card.classList.remove('expanded');
 
   const aliasMeta = state.groupAliases?.[groupName];
   const displayName = groupLabel(groupName);
@@ -1732,21 +1792,44 @@ function createGroupCard(groupName, containerIds) {
     header.appendChild(icon);
   }
 
+  const expandBtn = document.createElement('button');
+  expandBtn.className = 'card-expand-btn';
+  expandBtn.textContent = '▼';
+  expandBtn.title = 'Expandir/recolher';
+
   const info = document.createElement('div');
   info.className = 'group-card-glass-info';
+
+  const nameRow = document.createElement('div');
+  nameRow.className = 'group-card-glass-name-row';
 
   const nameEl = document.createElement('div');
   nameEl.className = 'group-card-glass-name';
   nameEl.textContent = displayName;
-  info.appendChild(nameEl);
+  nameRow.appendChild(nameEl);
+
+  const aliasEditor = createGroupAliasEditor(groupName, () => render());
+  nameRow.appendChild(aliasEditor.button);
+  info.appendChild(nameRow);
+
+  // Linha separada para contagem e status
+  const statsRow = document.createElement('div');
+  statsRow.className = 'group-card-stats-row';
 
   const badge = document.createElement('span');
   badge.className = 'group-card-glass-badge';
   badge.textContent = `${containerIds.length} container${containerIds.length > 1 ? 's' : ''}`;
-  info.appendChild(badge);
+  statsRow.appendChild(badge);
+
+  const groupStatus = computeGroupStatus(containerIds);
+  const statusPill = document.createElement('span');
+  statusPill.className = `status-pill ${groupStatus.className}`;
+  statusPill.textContent = groupStatus.label;
+  statsRow.appendChild(statusPill);
+
+  info.appendChild(statsRow);
 
   header.appendChild(info);
-
   // Auto-start button (clicável, igual à página de Grupos)
   const autostartButton = document.createElement('button');
   autostartButton.className = `group-autostart-toggle ${isGroupEnabled ? 'enabled' : 'disabled'}`;
@@ -1808,22 +1891,58 @@ function createGroupCard(groupName, containerIds) {
   });
   header.appendChild(autostartButton);
 
+  // Keep header at the top; alias form sits right under it
   card.appendChild(header);
+  card.appendChild(aliasEditor.form);
 
-  // Actions
+  // Quick actions (icon-only) visible even when collapsed)
+  const quickActions = document.createElement('div');
+  quickActions.className = 'card-quick-actions';
+  getGroupActions(groupName)
+    .filter((a) => a !== "delete")
+    .forEach((action) => {
+      const btn = createButton(
+        actionIcon(action),
+        `ghost small${action === "delete" ? " danger" : ""}`,
+        (e) => {
+          e.stopPropagation();
+          handleGroupAction(groupName, action);
+        }
+      );
+      btn.title = groupActionLabel(action);
+      quickActions.appendChild(btn);
+    });
+  const exportBtn = createButton("⬇", "ghost small", (e) => {
+    e.stopPropagation();
+    exportGroup(groupName, false).catch((err) => showToast(err.message || "Erro ao exportar", true));
+  });
+  exportBtn.title = "Exportar";
+  quickActions.appendChild(exportBtn);
+  card.appendChild(quickActions);
+  card.appendChild(expandBtn);
+
+  // Actions/details shown only when expanded
+  const collapsible = document.createElement('div');
+  collapsible.className = 'card-collapsible';
+
   const actions = document.createElement('div');
   actions.className = 'group-card-glass-actions';
 
-  const startBtn = createButton('▶ Iniciar Todos', 'ghost small', () => handleGroupAction(groupName, 'start'));
-  const stopBtn = createButton('■ Parar Todos', 'ghost small', () => handleGroupAction(groupName, 'stop'));
-  const restartBtn = createButton('⟳ Reiniciar', 'ghost small', () => handleGroupAction(groupName, 'restart'));
-  const deleteBtn = createButton('🗑 Excluir', 'ghost small', () => deleteGroup(groupName));
-
-  actions.appendChild(startBtn);
-  actions.appendChild(stopBtn);
-  actions.appendChild(restartBtn);
-  actions.appendChild(deleteBtn);
-  card.appendChild(actions);
+  getGroupActions(groupName).forEach((action) => {
+    actions.appendChild(
+      createButton(
+        groupActionLabel(action),
+        `ghost small${action === "delete" ? " danger" : ""}`,
+        () => (action === "delete" ? deleteGroup(groupName) : handleGroupAction(groupName, action))
+      )
+    );
+  });
+  actions.appendChild(
+    createButton("⬇ Exportar", "ghost small", () =>
+      exportGroup(groupName, false).catch((err) => showToast(err.message || "Erro ao exportar", true))
+    )
+  );
+  collapsible.appendChild(actions);
 
   // Container list
   const list = document.createElement('div');
@@ -1837,7 +1956,25 @@ function createGroupCard(groupName, containerIds) {
     list.appendChild(item);
   });
 
-  card.appendChild(list);
+  collapsible.appendChild(list);
+  card.appendChild(collapsible);
+
+  // Toggle expand on header click (ignore button clicks)
+  header.addEventListener('click', (e) => {
+    if (e.target.closest('button')) return;
+    const isExpanded = card.classList.toggle('expanded');
+    collapsible.style.display = isExpanded ? 'block' : 'none';
+    expandBtn.textContent = isExpanded ? '▲' : '▼';
+  });
+  expandBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isExpanded = card.classList.toggle('expanded');
+    collapsible.style.display = isExpanded ? 'block' : 'none';
+    expandBtn.textContent = isExpanded ? '▲' : '▼';
+  });
+  // initial collapsed
+  collapsible.style.display = 'none';
+
   return card;
 }
 
@@ -1868,21 +2005,38 @@ function createContainerItem(container) {
   const actions = document.createElement('div');
   actions.className = 'container-item-glass-actions';
 
-  const isRunning = container.state === 'running';
-  if (isRunning) {
-    actions.appendChild(createButton('■', 'ghost small', () => handleAction(container.id, 'stop')));
-    actions.appendChild(createButton('⟳', 'ghost small', () => handleAction(container.id, 'restart')));
-  } else {
-    actions.appendChild(createButton('▶', 'ghost small', () => handleAction(container.id, 'start')));
-  }
+  getContainerActions(container).forEach((action) => {
+    const btn = createButton(
+      actionIcon(action),
+      `ghost small${action === "delete" ? " danger" : ""}`,
+      () => handleAction(container.id, action)
+    );
+    btn.title = actionLabel(action);
+    actions.appendChild(btn);
+  });
+
+  const exportBtn = createButton("⬇", "ghost small", () =>
+    exportContainer(container.id, false, container.name).catch((err) =>
+      showToast(err.message || "Erro ao exportar", true)
+    )
+  );
+  exportBtn.title = "Exportar";
+  actions.appendChild(exportBtn);
+
+  const editBtn = createButton("✎", "ghost small", () =>
+    openDockerfileEditor(container.id, container.name)
+  );
+  editBtn.title = "Editar Dockerfile";
+  actions.appendChild(editBtn);
 
   item.appendChild(actions);
   return item;
 }
 
-function createStandaloneCard(container) {
+function createStandaloneCard(container, selectedGroups) {
   const card = document.createElement('div');
   card.className = 'group-card-glass';
+  card.classList.remove('expanded');
 
   const display = containerDisplay(container);
 
@@ -1901,18 +2055,98 @@ function createStandaloneCard(container) {
   const info = document.createElement('div');
   info.className = 'group-card-glass-info';
 
+  const nameRow = document.createElement('div');
+  nameRow.className = 'group-card-glass-name-row';
+
   const nameEl = document.createElement('div');
   nameEl.className = 'group-card-glass-name';
   nameEl.textContent = display.main;
-  info.appendChild(nameEl);
+  nameRow.appendChild(nameEl);
+
+  const aliasEditor = createAliasEditor(container, () => render());
+  nameRow.appendChild(aliasEditor.button);
+
+  info.appendChild(nameRow);
 
   const statusBadge = document.createElement('span');
   statusBadge.className = `status-pill status-${container.state === 'running' ? 'running' : 'exited'}`;
   statusBadge.textContent = container.state;
   info.appendChild(statusBadge);
 
+  const autostartControl = createAutostartToggle(container, selectedGroups);
+  autostartControl.classList.add('autostart-inline');
+  info.appendChild(autostartControl);
+
   header.appendChild(info);
+
+  const quickActions = document.createElement('div');
+  quickActions.className = 'card-quick-actions';
+  getContainerActions(container).forEach((action) => {
+    const btn = createButton(
+      actionIcon(action),
+      `ghost small${action === "delete" ? " danger" : ""}`,
+      (e) => {
+        e.stopPropagation();
+        handleAction(container.id, action);
+      }
+    );
+    btn.title = actionLabel(action);
+    quickActions.appendChild(btn);
+  });
+  const exportBtn = createButton("⬇", "ghost small", (e) => {
+    e.stopPropagation();
+    exportContainer(container.id, false, container.name).catch((err) =>
+      showToast(err.message || "Erro ao exportar", true)
+    );
+  });
+  exportBtn.title = "Exportar";
+  quickActions.appendChild(exportBtn);
+  const editBtn = createButton("✎", "ghost small", (e) => {
+    e.stopPropagation();
+    openDockerfileEditor(container.id, container.name);
+  });
+  editBtn.title = "Editar Dockerfile";
+  quickActions.appendChild(editBtn);
+  // Exibe ícones de ação logo abaixo do header
   card.appendChild(header);
+  card.appendChild(quickActions);
+
+  const expandBtn = document.createElement('button');
+  expandBtn.className = 'card-expand-btn';
+  expandBtn.textContent = '▼';
+  expandBtn.title = 'Expandir/recolher';
+  card.appendChild(expandBtn);
+
+  const collapsible = document.createElement('div');
+  collapsible.className = 'card-collapsible';
+
+  // Actions
+  const actions = document.createElement('div');
+  actions.className = 'group-card-glass-actions';
+
+  getContainerActions(container).forEach((action) => {
+    actions.appendChild(
+      createButton(
+        actionLabel(action),
+        `ghost small${action === "delete" ? " danger" : ""}`,
+        () => handleAction(container.id, action)
+      )
+    );
+  });
+
+  actions.appendChild(
+    createButton("⬇ Exportar", "ghost small", () =>
+      exportContainer(container.id, false, container.name).catch((err) =>
+        showToast(err.message || "Erro ao exportar", true)
+      )
+    )
+  );
+  actions.appendChild(
+    createButton("✎ Editar Dockerfile", "ghost small", () => openDockerfileEditor(container.id, container.name))
+  );
+
+  collapsible.appendChild(actions);
+  collapsible.appendChild(aliasEditor.form);
 
   // Details
   const details = document.createElement('div');
@@ -1928,21 +2162,28 @@ function createStandaloneCard(container) {
   portsLine.innerHTML = `<strong>Ports:</strong> ${container.ports || '—'}`;
   details.appendChild(portsLine);
 
-  card.appendChild(details);
+  collapsible.appendChild(details);
+  card.appendChild(collapsible);
 
-  // Actions
-  const actions = document.createElement('div');
-  actions.className = 'group-card-glass-actions';
+  aliasEditor.button.addEventListener('click', () => {
+    card.classList.add('expanded');
+    collapsible.style.display = 'block';
+    expandBtn.textContent = '▲';
+  });
 
-  const isRunning = container.state === 'running';
-  if (isRunning) {
-    actions.appendChild(createButton('■ Parar', 'ghost small', () => handleAction(container.id, 'stop')));
-    actions.appendChild(createButton('⟳ Reiniciar', 'ghost small', () => handleAction(container.id, 'restart')));
-  } else {
-    actions.appendChild(createButton('▶ Iniciar', 'ghost small', () => handleAction(container.id, 'start')));
-  }
-
-  card.appendChild(actions);
+  header.addEventListener('click', (e) => {
+    if (e.target.closest('button')) return;
+    const expanded = card.classList.toggle('expanded');
+    collapsible.style.display = expanded ? 'block' : 'none';
+    expandBtn.textContent = expanded ? '▲' : '▼';
+  });
+  expandBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const expanded = card.classList.toggle('expanded');
+    collapsible.style.display = expanded ? 'block' : 'none';
+    expandBtn.textContent = expanded ? '▲' : '▼';
+  });
+  collapsible.style.display = 'none';
   return card;
 }
 
@@ -1957,19 +2198,12 @@ function createButton(text, className, onClick) {
 function renderGroupActionRow(groupName, hasAvailable) {
   const row = document.createElement("div");
   row.className = "group-action-row";
-  const labels = {
-    start: "Iniciar",
-    stop: "Parar",
-    restart: "Reiniciar",
-  };
-  const containerStates = getGroupContainerStates(groupName);
-  const isRunning = containerStates.some((s) => s === "running");
-  const actions = isRunning ? ["stop", "restart"] : ["start"];
-  Object.entries(labels).forEach(([action, label]) => {
-    if (!actions.includes(action)) return;
+  const actions = getGroupActions(groupName);
+  actions.forEach((action) => {
+    if (action === "delete") return;
     const button = document.createElement("button");
     button.className = "ghost small";
-    button.textContent = label;
+    button.textContent = groupActionLabel(action);
     button.disabled = !hasAvailable;
     button.addEventListener("click", () => handleGroupAction(groupName, action));
     row.appendChild(button);
@@ -2002,11 +2236,9 @@ function setView(view) {
 }
 
 function updateViewVisibility() {
+  // Mostrar sempre todas as seções (containers e grupos) já que não há navegação lateral
   dom.viewPanels.forEach((panel) => {
-    panel.classList.toggle("hidden", panel.dataset.view !== state.currentView);
-  });
-  dom.navItems.forEach((button) => {
-    button.classList.toggle("active", button.dataset.view === state.currentView);
+    panel.classList.remove("hidden");
   });
 }
 
@@ -2153,6 +2385,43 @@ function sortContainers(containers, sortBy, sortOrder, selectedGroups) {
   return sorted;
 }
 
+function getContainerActions(container) {
+  if (!container) return [];
+  return container.state === "running"
+    ? ["stop", "restart", "delete"]
+    : ["start", "delete"];
+}
+
+function actionLabel(action) {
+  switch (action) {
+    case "start":
+      return t("actions.start");
+    case "stop":
+      return t("actions.stop");
+    case "restart":
+      return t("actions.restart");
+    case "delete":
+      return t("actions.delete");
+    default:
+      return action;
+  }
+}
+
+function actionIcon(action) {
+  switch (action) {
+    case "start":
+      return "▶";
+    case "stop":
+      return "■";
+    case "restart":
+      return "⟳";
+    case "delete":
+      return "🗑";
+    default:
+      return action;
+  }
+}
+
 function getVisibleContainers(includeGrouped = false) {
   const term = state.filter;
   const runningOnly = state.runningOnly;
@@ -2213,6 +2482,21 @@ function invertGroups() {
   return inverted;
 }
 
+function computeOrderedGroups(visibleContainers, selectedGroups) {
+  const seen = new Set();
+  const order = [];
+  visibleContainers.forEach((container) => {
+    const groups = selectedGroups.get(container.id) || [];
+    if (!groups.length) return;
+    const primary = groups[0];
+    if (!seen.has(primary)) {
+      seen.add(primary);
+      order.push(primary);
+    }
+  });
+  return order;
+}
+
 function truncateText(text, max = 60) {
   if (!text) return "";
   if (text.length <= max) return text;
@@ -2236,12 +2520,15 @@ function groupLabel(name) {
 
 function formatContainerName(name) {
   if (!name) return "";
-  return name.charAt(0).toUpperCase() + name.slice(1);
+  const trimmed = String(name).trim();
+  if (!trimmed) return "";
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
 }
 
 function containerDisplay(container) {
   if (!container) return { main: "", original: "" };
-  const base = formatContainerName(container.name);
+  const baseName = formatContainerName(container.name);
+  const fallbackName = baseName || (container.id ? String(container.id).slice(0, 12) : "");
   const meta = state.containerAliases?.[container.id];
   let alias = "";
   let icon = container.icon;
@@ -2251,11 +2538,311 @@ function containerDisplay(container) {
   } else if (typeof meta === "string") {
     alias = meta;
   }
+  const main = alias || fallbackName;
   return {
-    main: alias || base,
-    original: alias ? base : "",
+    main,
+    original: alias ? fallbackName : "",
     icon,
   };
+}
+
+function createAliasEditor(container, onSaved) {
+  const renameButton = document.createElement("button");
+  renameButton.type = "button";
+  renameButton.className = "icon-button";
+  renameButton.title = "Editar apelido e ícone";
+  renameButton.textContent = "✎";
+
+  const aliasForm = document.createElement("form");
+  aliasForm.className = "alias-form";
+  aliasForm.classList.remove("visible");
+
+  const aliasInput = document.createElement("input");
+  aliasInput.type = "text";
+  aliasInput.placeholder = "Apelido (opcional)";
+  const metaAlias = state.containerAliases[container.id];
+  aliasInput.value =
+    metaAlias && typeof metaAlias === "object" ? metaAlias.alias || "" : metaAlias || "";
+
+  const aliasRow = document.createElement("div");
+  aliasRow.className = "icon-row";
+
+  const aliasSpacer = document.createElement("button");
+  aliasSpacer.type = "button";
+  aliasSpacer.className = "ghost small upload-placeholder";
+  aliasSpacer.textContent = "📤 Upload";
+  aliasSpacer.tabIndex = -1;
+  aliasSpacer.setAttribute("aria-hidden", "true");
+
+  aliasRow.appendChild(aliasInput);
+  aliasRow.appendChild(aliasSpacer);
+
+  const iconInput = document.createElement("input");
+  iconInput.type = "text";
+  iconInput.placeholder = "Ícone (URL) ex: http://icons.casaos.local/...";
+  iconInput.value = metaAlias && typeof metaAlias === "object" ? metaAlias.icon || "" : "";
+
+  const iconContainer = document.createElement("div");
+  iconContainer.className = "icon-row";
+
+  const uploadButton = document.createElement("button");
+  uploadButton.type = "button";
+  uploadButton.className = "ghost small";
+  uploadButton.textContent = "📤 Upload";
+  uploadButton.title = "Upload icon image";
+
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.accept = "image/png,image/jpeg,image/jpg,image/gif,image/svg+xml,image/webp,image/x-icon";
+  fileInput.style.display = "none";
+
+  uploadButton.addEventListener("click", () => fileInput.click());
+
+  fileInput.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      showToast("Arquivo muito grande. Máximo: 5MB", true);
+      return;
+    }
+    try {
+      uploadButton.disabled = true;
+      uploadButton.textContent = "⏳ Enviando...";
+
+      const formData = new FormData();
+      formData.append("icon", file);
+
+      const response = await fetch("/api/upload-icon", {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Erro ao fazer upload");
+      }
+
+      iconInput.value = data.url;
+      showToast("Ícone enviado com sucesso!", false);
+    } catch (error) {
+      showToast(error.message || "Erro ao fazer upload do ícone", true);
+    } finally {
+      uploadButton.disabled = false;
+      uploadButton.textContent = "📤 Upload";
+      fileInput.value = "";
+    }
+  });
+
+  iconContainer.appendChild(iconInput);
+  iconContainer.appendChild(uploadButton);
+  iconContainer.appendChild(fileInput);
+
+  const saveAlias = document.createElement("button");
+  saveAlias.type = "submit";
+  saveAlias.className = "ghost small";
+  saveAlias.textContent = "Salvar";
+  const cancelAlias = document.createElement("button");
+  cancelAlias.type = "button";
+  cancelAlias.className = "ghost small";
+  cancelAlias.textContent = "Cancelar";
+
+  const actionsRow = document.createElement("div");
+  actionsRow.className = "alias-actions";
+  actionsRow.appendChild(saveAlias);
+  actionsRow.appendChild(cancelAlias);
+
+  aliasForm.appendChild(aliasRow);
+  aliasForm.appendChild(iconContainer);
+  aliasForm.appendChild(actionsRow);
+
+  const resetForm = () => {
+    const currentMeta = state.containerAliases[container.id];
+    aliasInput.value =
+      currentMeta && typeof currentMeta === "object"
+        ? currentMeta.alias || ""
+        : currentMeta || "";
+    iconInput.value =
+      currentMeta && typeof currentMeta === "object" ? currentMeta.icon || "" : "";
+  };
+
+  renameButton.addEventListener("click", (e) => {
+    e.stopPropagation();
+    aliasForm.classList.add("visible");
+    aliasInput.focus();
+  });
+
+  cancelAlias.addEventListener("click", () => {
+    resetForm();
+    aliasForm.classList.remove("visible");
+  });
+
+  aliasForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const trimmed = aliasInput.value.trim();
+    const iconTrimmed = iconInput.value.trim();
+    try {
+      await saveContainerAlias(container.id, trimmed, iconTrimmed);
+      aliasForm.classList.remove("visible");
+      if (onSaved) {
+        onSaved();
+      } else {
+        render();
+      }
+    } catch (error) {
+      showToast(error.message || "Erro ao salvar apelido.", true);
+    }
+  });
+
+  return { button: renameButton, form: aliasForm };
+}
+
+function createGroupAliasEditor(groupName, onSaved) {
+  const aliasMeta = state.groupAliases?.[groupName];
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "icon-button";
+  button.title = "Editar apelido e ícone";
+  button.textContent = "✎";
+
+  const aliasForm = document.createElement("form");
+  aliasForm.className = "alias-form";
+  aliasForm.classList.remove("visible");
+
+  const aliasInput = document.createElement("input");
+  aliasInput.type = "text";
+  aliasInput.placeholder = "Apelido (opcional)";
+  aliasInput.value = aliasMeta && typeof aliasMeta === "object" ? aliasMeta.alias || "" : aliasMeta || "";
+
+  const aliasRow = document.createElement("div");
+  aliasRow.className = "icon-row";
+
+  const aliasSpacer = document.createElement("button");
+  aliasSpacer.type = "button";
+  aliasSpacer.className = "ghost small upload-placeholder";
+  aliasSpacer.textContent = "📤 Upload";
+  aliasSpacer.tabIndex = -1;
+  aliasSpacer.setAttribute("aria-hidden", "true");
+
+  aliasRow.appendChild(aliasInput);
+  aliasRow.appendChild(aliasSpacer);
+
+  const iconInput = document.createElement("input");
+  iconInput.type = "text";
+  iconInput.placeholder = "Ícone (URL) ex: http://icons.casaos.local/...";
+  iconInput.value = aliasMeta && typeof aliasMeta === "object" ? aliasMeta.icon || "" : "";
+
+  const iconContainer = document.createElement("div");
+  iconContainer.className = "icon-row";
+
+  const uploadButton = document.createElement("button");
+  uploadButton.type = "button";
+  uploadButton.className = "ghost small";
+  uploadButton.textContent = "📤 Upload";
+  uploadButton.title = "Upload icon image";
+
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.accept = "image/png,image/jpeg,image/jpg,image/gif,image/svg+xml,image/webp,image/x-icon";
+  fileInput.style.display = "none";
+
+  uploadButton.addEventListener("click", () => fileInput.click());
+
+  fileInput.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      showToast("Arquivo muito grande. Máximo: 5MB", true);
+      return;
+    }
+    try {
+      uploadButton.disabled = true;
+      uploadButton.textContent = "⏳ Enviando...";
+
+      const formData = new FormData();
+      formData.append("icon", file);
+
+      const response = await fetch("/api/upload-icon", {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Erro ao fazer upload");
+      }
+
+      iconInput.value = data.url;
+      showToast("Ícone enviado com sucesso!", false);
+    } catch (error) {
+      showToast(error.message || "Erro ao fazer upload do ícone", true);
+    } finally {
+      uploadButton.disabled = false;
+      uploadButton.textContent = "📤 Upload";
+      fileInput.value = "";
+    }
+  });
+
+  iconContainer.appendChild(iconInput);
+  iconContainer.appendChild(uploadButton);
+  iconContainer.appendChild(fileInput);
+
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "submit";
+  saveBtn.className = "ghost small";
+  saveBtn.textContent = "Salvar";
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "ghost small";
+  cancelBtn.textContent = "Cancelar";
+
+  const actionsRow = document.createElement("div");
+  actionsRow.className = "alias-actions";
+  actionsRow.appendChild(saveBtn);
+  actionsRow.appendChild(cancelBtn);
+
+  aliasForm.appendChild(aliasRow);
+  aliasForm.appendChild(iconContainer);
+  aliasForm.appendChild(actionsRow);
+
+  const resetForm = () => {
+    const currentMeta = state.groupAliases?.[groupName];
+    aliasInput.value =
+      currentMeta && typeof currentMeta === "object" ? currentMeta.alias || "" : currentMeta || "";
+    iconInput.value = currentMeta && typeof currentMeta === "object" ? currentMeta.icon || "" : "";
+  };
+
+  button.addEventListener("click", (e) => {
+    e.stopPropagation();
+    aliasForm.classList.add("visible");
+    aliasInput.focus();
+  });
+
+  cancelBtn.addEventListener("click", () => {
+    resetForm();
+    aliasForm.classList.remove("visible");
+  });
+
+  aliasForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const trimmed = aliasInput.value.trim();
+    const iconTrimmed = iconInput.value.trim();
+    try {
+      await renameGroup(groupName, trimmed, iconTrimmed);
+      aliasForm.classList.remove("visible");
+      if (onSaved) {
+        onSaved();
+      } else {
+        render();
+      }
+    } catch (error) {
+      showToast(error.message || "Erro ao renomear grupo.", true);
+    }
+  });
+
+  return { button, form: aliasForm };
 }
 
 function getAutostartStatus(container, selectedGroups) {
@@ -2311,9 +2898,7 @@ function applyAutostartButtonState(button, container, selectedGroups) {
   return status;
 }
 
-function renderAutostartCell(container, selectedGroups) {
-  const cell = document.createElement("td");
-  cell.style.textAlign = "center";
+function createAutostartToggle(container, selectedGroups) {
   const groupsForContainer = selectedGroups.get(container.id) || [];
 
   // Se faz parte de um grupo, controle deve ser feito apenas na aba de grupos.
@@ -2324,8 +2909,7 @@ function renderAutostartCell(container, selectedGroups) {
     badge.textContent = status.enabled ? "Habilitado (grupo)" : "Desabilitado (grupo)";
     badge.title = `Gerencie o auto-start deste container na aba de Grupos (${groupsForContainer.join(", ")}).`;
     badge.setAttribute("aria-disabled", "true");
-    cell.appendChild(badge);
-    return cell;
+    return badge;
   }
 
   // Fora de grupos: habilita/desabilita individualmente e ajusta restart policy.
@@ -2364,7 +2948,14 @@ function renderAutostartCell(container, selectedGroups) {
       applyAutostartButtonState(button, container, selectedGroups);
     }
   });
-  cell.appendChild(autostartButton);
+
+  return autostartButton;
+}
+
+function renderAutostartCell(container, selectedGroups) {
+  const cell = document.createElement("td");
+  cell.style.textAlign = "center";
+  cell.appendChild(createAutostartToggle(container, selectedGroups));
   return cell;
 }
 
@@ -2387,6 +2978,204 @@ function getGroupContainerStates(groupName) {
   return getGroupContainerIds(groupName).map((id) => valid.get(id));
 }
 
+function getGroupActions(groupName) {
+  const states = getGroupContainerStates(groupName);
+  if (!states.length) return ["delete"];
+  const hasRunning = states.some((s) => s === "running");
+  return hasRunning ? ["stop", "restart", "delete"] : ["start", "delete"];
+}
+
+function groupActionLabel(action) {
+  switch (action) {
+    case "start":
+      return "▶ Iniciar Todos";
+    case "stop":
+      return "■ Parar Todos";
+    case "restart":
+      return "⟳ Reiniciar";
+    case "delete":
+      return "🗑 Excluir";
+    default:
+      return action;
+  }
+}
+
+async function downloadFile(url, filename) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.error || "Falha ao baixar arquivo");
+  }
+  const blob = await response.blob();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(link.href);
+}
+
+async function exportContainer(containerId, includeData = false, friendlyName = "") {
+  const suffix = includeData ? "?includeData=1" : "";
+  const safeName = friendlyName || containerId;
+  await downloadFile(`/api/containers/${encodeURIComponent(containerId)}/export${suffix}`, `${safeName}-export.zip`);
+}
+
+async function exportGroup(groupName, includeData = false) {
+  const suffix = includeData ? "?includeData=1" : "";
+  await downloadFile(`/api/groups/${encodeURIComponent(groupName)}/export${suffix}`, `${groupName}-export.zip`);
+}
+
+function openModal({ title, body, confirmText = "Salvar", onConfirm }) {
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  const h3 = document.createElement("h3");
+  h3.textContent = title;
+  modal.appendChild(h3);
+  modal.appendChild(body);
+
+  const actions = document.createElement("div");
+  actions.className = "modal-actions";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.className = "ghost";
+  cancelBtn.textContent = "Cancelar";
+  const confirmBtn = document.createElement("button");
+  confirmBtn.className = "ghost";
+  confirmBtn.textContent = confirmText;
+  actions.appendChild(cancelBtn);
+  actions.appendChild(confirmBtn);
+  modal.appendChild(actions);
+
+  cancelBtn.addEventListener("click", () => backdrop.remove());
+  confirmBtn.addEventListener("click", async () => {
+    confirmBtn.disabled = true;
+    try {
+      await onConfirm();
+      backdrop.remove();
+    } catch (error) {
+      showToast(error.message || "Erro ao salvar", true);
+    } finally {
+      confirmBtn.disabled = false;
+    }
+  });
+
+  backdrop.appendChild(modal);
+  document.body.appendChild(backdrop);
+}
+
+async function openDockerfileEditor(containerId, displayName) {
+  try {
+    const res = await fetch(`/api/containers/${encodeURIComponent(containerId)}/dockerfile`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Falha ao carregar Dockerfile");
+
+    const textarea = document.createElement("textarea");
+    textarea.value = data.content || "";
+    const body = document.createElement("div");
+    body.appendChild(textarea);
+
+    openModal({
+      title: `Editar Dockerfile - ${displayName || containerId}`,
+      body,
+      confirmText: "Salvar e reiniciar",
+      onConfirm: async () => {
+        const response = await fetch(`/api/containers/${encodeURIComponent(containerId)}/dockerfile`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: textarea.value }),
+        });
+        const respData = await response.json();
+        if (!response.ok) throw new Error(respData.error || "Falha ao salvar Dockerfile");
+        showToast("Dockerfile salvo e container reiniciado.");
+        await loadContainersOnly();
+      },
+    });
+  } catch (error) {
+    showToast(error.message || "Erro ao editar Dockerfile", true);
+  }
+}
+
+function openNewContainerFromDockerfile() {
+  const body = document.createElement("div");
+  body.style.display = "flex";
+  body.style.flexDirection = "column";
+  body.style.gap = "0.65rem";
+
+  const nameInput = document.createElement("input");
+  nameInput.placeholder = "Nome do container (usado como tag e --name)";
+  const cmdInput = document.createElement("input");
+  cmdInput.placeholder = "Comando (opcional, ex: node server.js)";
+  const envInput = document.createElement("textarea");
+  envInput.placeholder = "Arquivo .env (opcional)";
+  const dockerfileArea = document.createElement("textarea");
+  dockerfileArea.placeholder = "Dockerfile";
+
+  body.appendChild(nameInput);
+  body.appendChild(cmdInput);
+  body.appendChild(envInput);
+  body.appendChild(dockerfileArea);
+
+  openModal({
+    title: "Criar container via Dockerfile",
+    body,
+    confirmText: "Build & Run",
+    onConfirm: async () => {
+      const payload = {
+        name: nameInput.value.trim(),
+        dockerfile: dockerfileArea.value,
+        command: cmdInput.value.trim(),
+        env: envInput.value,
+        files: [],
+      };
+      const response = await fetch("/api/containers/create-from-dockerfile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Falha ao criar container");
+      showToast("Container criado.");
+      await loadContainersOnly();
+    },
+  });
+}
+
+function openNewContainerFromCommand() {
+  const body = document.createElement("div");
+  const textarea = document.createElement("textarea");
+  textarea.placeholder = "docker run -d --name meuapp -p 8080:80 imagem:tag";
+  body.appendChild(textarea);
+
+  openModal({
+    title: "Criar container via CLI",
+    body,
+    confirmText: "Executar",
+    onConfirm: async () => {
+      const response = await fetch("/api/containers/create-from-command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: textarea.value }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Falha ao executar comando");
+      showToast("Comando enviado.");
+      await loadContainersOnly();
+    },
+  });
+}
+
+function confirmGroupAction(groupName, action) {
+  const label = groupActionLabel(action);
+  const displayName = groupLabel(groupName);
+  if (action === "delete") {
+    return confirm(`Excluir o grupo "${displayName}"? Os containers permanecem no sistema.`);
+  }
+  return confirm(`${label} para o grupo "${displayName}"?`);
+}
+
 function updateSelectAllState() {
   const visible = getVisibleContainers();
   const selectedCount = visible.filter((container) => state.selected.has(container.id))
@@ -2398,9 +3187,15 @@ function updateSelectAllState() {
 }
 
 async function handleAction(containerId, action) {
+  if (action === "delete") {
+    const container = state.containers.find((c) => c.id === containerId);
+    const displayName = container ? containerDisplay(container).main : containerId;
+    const confirmed = confirm(`Excluir o container "${displayName}"? Esta ação não pode ser desfeita.`);
+    if (!confirmed) return;
+  }
   try {
     await controlContainer(containerId, action);
-    showToast(`Ação "${action}" enviada.`);
+    showToast(`Ação "${actionLabel(action)}" enviada.`);
     await loadContainersOnly();
   } catch (error) {
     showToast(error.message || "Falha ao executar ação.", true);
@@ -2411,6 +3206,12 @@ async function handleBulkAction(action) {
   if (!state.selected.size) {
     showToast("Selecione ao menos um container.", true);
     return;
+  }
+  if (action === "delete") {
+    const confirmed = confirm(
+      `Excluir ${state.selected.size} container${state.selected.size > 1 ? "es" : ""}? Esta ação não pode ser desfeita.`
+    );
+    if (!confirmed) return;
   }
   try {
     await Promise.all(
@@ -2424,6 +3225,7 @@ async function handleBulkAction(action) {
 }
 
 async function handleGroupAction(groupName, action) {
+  if (!confirmGroupAction(groupName, action)) return;
   const ids = getGroupContainerIds(groupName);
   if (!ids.length) {
     showToast("Nenhum container disponível neste grupo.", true);
@@ -2443,9 +3245,7 @@ async function loadContainersOnly() {
     state.containers = await loadContainers();
     applyAutoGrouping(true);
     cleanSelection();
-    renderTable();
-    renderGroups();
-    renderSelectionInfo();
+    render();
   } catch (error) {
     showToast(error.message || "Falha ao atualizar containers.", true);
   }
@@ -2461,8 +3261,7 @@ async function refreshGroupsView() {
     state.groups = groupsResponse.groups;
     state.groupAliases = groupsResponse.aliases || {};
     applyAutoGrouping(true);
-    renderGroups();
-    renderTable();
+    render();
   } catch (error) {
     showToast(error.message || "Falha ao atualizar grupos.", true);
   }
@@ -2480,6 +3279,7 @@ async function controlContainer(id, action) {
 }
 
 async function deleteGroup(name) {
+  if (!confirmGroupAction(name, "delete")) return;
   delete state.groups[name];
   delete state.groupAliases[name];
   try {

@@ -9,24 +9,18 @@
   </head>
   <body>
     <div class="app-shell">
-      <aside class="sidebar">
-        <div class="sidebar-brand">
-          <div style="display: flex; align-items: center; gap: 0.5rem;">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M13.5 3h-3v3h3V3zm0 4h-3v3h3V7zm0 4h-3v3h3v-3zm4-8h-3v3h3V3zm0 4h-3v3h3V7zm0 4h-3v3h3v-3zm-8-8h-3v3h3V3zm0 4h-3v3h3V7zm-4-4h-3v3h3V3zm0 4h-3v3h3V7z" fill="currentColor"/>
-              <path d="M23.5 11.5c0-.8-.3-1.5-.8-2-.5-.5-1.2-.8-2-.8H19v-2c0-.6-.4-1-1-1h-6v3h5v2h-7.5c-.3 0-.5.2-.5.5v4c0 .3.2.5.5.5h3.4c.3 1.2 1.4 2 2.6 2s2.3-.8 2.6-2h1.4c1.1 0 2-.9 2-2v-2.2z" fill="currentColor"/>
-            </svg>
-            <div>
-              <h1 id="app-title" style="margin: 0;">Docker Web Control</h1>
-              <p id="app-subtitle" style="margin: 0; font-size: 0.875rem; opacity: 0.8;">Visualize, agrupe e automatize.</p>
-            </div>
+      <header class="topbar">
+        <div class="brand-inline">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M13.5 3h-3v3h3V3zm0 4h-3v3h3V7zm0 4h-3v3h3v-3zm4-8h-3v3h3V3zm0 4h-3v3h3V7zm0 4h-3v3h3v-3zm-8-8h-3v3h3V3zm0 4h-3v3h3V7zm-4-4h-3v3h3V3zm0 4h-3v3h3V7z" fill="currentColor"/>
+            <path d="M23.5 11.5c0-.8-.3-1.5-.8-2-.5-.5-1.2-.8-2-.8H19v-2c0-.6-.4-1-1-1h-6v3h5v2h-7.5c-.3 0-.5.2-.5.5v4c0 .3.2.5.5.5h3.4c.3 1.2 1.4 2 2.6 2s2.3-.8 2.6-2h1.4c1.1 0 2-.9 2-2v-2.2z" fill="currentColor"/>
+          </svg>
+          <div class="brand-text">
+            <h1 id="app-title">Docker Web Control</h1>
+            <p id="app-subtitle">Visualize, agrupe e automatize.</p>
           </div>
         </div>
-        <nav class="sidebar-nav">
-          <button class="nav-item active" data-view="containers" id="nav-containers">Containers</button>
-          <button class="nav-item" data-view="groups" id="nav-groups" style="display: none;">Grupos</button>
-        </nav>
-        <div class="sidebar-lang">
+        <div class="topbar-actions">
           <label class="language-select">
             <span id="nav-language-label">Idioma</span>
             <select id="lang-select">
@@ -35,7 +29,7 @@
             </select>
           </label>
         </div>
-      </aside>
+      </header>
       <main class="page-layout">
         <section class="panel containers-panel view-panel" data-view="containers">
           <div class="panel-header">
@@ -46,14 +40,11 @@
           </div>
 
           <!-- View Mode Toggle -->
-          <div class="view-mode-toggle">
-            <label id="view-mode-label">Visualização:</label>
-            <button class="view-toggle-button" data-mode="table" id="toggle-table">
-              📊 Tabela Hierárquica
-            </button>
-            <button class="view-toggle-button active" data-mode="cards" id="toggle-cards">
-              🎴 Cards Visuais
-            </button>
+          <div class="view-mode-toggle" style="display: none;"></div>
+
+          <div class="quick-actions">
+            <button id="new-from-dockerfile" class="ghost small">➕ Novo via Dockerfile</button>
+            <button id="new-from-command" class="ghost small">➕ Novo via CLI</button>
           </div>
 
           <div class="filters">
@@ -68,6 +59,11 @@
               <span id="label-running-only">Mostrar somente ativos</span>
             </label>
           </div>
+          <!-- Cards View -->
+          <div id="cards-view">
+            <div class="containers-grid" id="cards-container"></div>
+          </div>
+
           <div id="selection-info" class="selection-info"></div>
           <div class="table-wrapper" id="table-view">
             <table>
@@ -134,11 +130,6 @@
               <button data-action="stop" class="ghost">Parar</button>
               <button data-action="restart" class="ghost">Reiniciar</button>
             </div>
-          </div>
-
-          <!-- Cards View -->
-          <div id="cards-view">
-            <div class="containers-grid" id="cards-container"></div>
           </div>
 
         </section>

@@ -83,9 +83,47 @@ select:focus {
 }
 
 .app-shell {
-  display: grid;
-  grid-template-columns: 240px 1fr;
+  display: flex;
+  flex-direction: column;
   min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 1rem 1.25rem;
+  background: linear-gradient(135deg, #0f2c3d, #0a1f2e);
+  border-bottom: 1px solid rgba(34, 211, 238, 0.12);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.brand-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.brand-text h1 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.brand-text p {
+  margin: 0;
+  font-size: 0.9rem;
+  opacity: 0.8;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-left: auto;
 }
 
 .sidebar {
@@ -128,9 +166,7 @@ select:focus {
 }
 
 .sidebar-lang {
-  margin-top: auto;
-  padding-top: 1rem;
-  border-top: 1px solid rgba(34, 211, 238, 0.12);
+  display: none;
 }
 
 .full-width {
@@ -281,6 +317,7 @@ tbody tr:hover {
   border-radius: 999px;
   font-size: 0.8rem;
   text-transform: uppercase;
+  justify-content: flex-start;
 }
 
 .status-running {
@@ -291,6 +328,11 @@ tbody tr:hover {
 .status-exited {
   background: rgba(248, 180, 180, 0.16);
   color: #fecdd3;
+}
+
+.status-mixed {
+  background: rgba(94, 234, 212, 0.15);
+  color: #a5f3fc;
 }
 
 .actions-cell button {
@@ -433,6 +475,52 @@ tbody tr:hover {
 }
 
 /* Auto-start toggle buttons */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+  backdrop-filter: blur(4px);
+}
+
+.modal {
+  background: rgba(13, 31, 44, 0.92);
+  border: 1px solid rgba(34, 211, 238, 0.25);
+  border-radius: 12px;
+  width: min(720px, 90vw);
+  padding: 1.25rem;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  color: #e8f5ff;
+}
+
+.modal h3 {
+  margin-top: 0;
+  margin-bottom: 0.75rem;
+}
+
+.modal textarea {
+  width: 100%;
+  min-height: 220px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #e8f5ff;
+  padding: 0.75rem;
+  border-radius: 8px;
+  font-family: monospace;
+}
+
+.modal .modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  flex-wrap: wrap;
+}
+
+/* Auto-start toggle buttons */
 .autostart-toggle {
   font-size: 0.75rem;
   padding: 0.35rem 0.75rem;
@@ -472,6 +560,10 @@ tbody tr:hover {
   cursor: not-allowed;
   pointer-events: none;
   opacity: 0.9;
+}
+
+.autostart-inline {
+  margin-left: 0;
 }
 
 .meta-line {
@@ -1053,6 +1145,18 @@ tbody tr:hover {
   margin-right: 0.5rem;
 }
 
+.view-mode-note {
+  color: #94a3b8;
+  font-size: 0.9rem;
+}
+
+.quick-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
 .view-toggle-button {
   padding: 0.6rem 1.2rem;
   background: rgba(255, 255, 255, 0.05);
@@ -1177,9 +1281,10 @@ tr.container-row-grouped:hover {
 
 .containers-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 1rem;
-  margin-top: 0.75rem;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 1.1rem;
+  margin-top: 0.85rem;
+  align-items: flex-start;
 }
 
 /* Group Card - Glassmorphism */
@@ -1202,12 +1307,14 @@ tr.container-row-grouped:hover {
 
 .group-card-glass-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.75rem;
+  row-gap: 0.35rem;
   margin-bottom: 1rem;
   padding-bottom: 1rem;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   flex-wrap: wrap;
+  cursor: pointer;
 }
 
 .group-card-glass-icon {
@@ -1219,14 +1326,55 @@ tr.container-row-grouped:hover {
 }
 
 .group-card-glass-info {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 140px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+}
+
+.group-card-glass-name-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .group-card-glass-name {
-  font-size: 1.05rem;
+  font-size: 0.95rem;
   font-weight: 700;
   margin-bottom: 0.3rem;
   color: #e8f5ff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.card-expand-btn {
+  padding: 0.3rem 0.55rem;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  color: #e8f5ff;
+  cursor: pointer;
+  position: absolute;
+  right: 0.6rem;
+  bottom: 0.6rem;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+}
+
+.card-quick-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.5rem 0;
+}
+
+.card-collapsible {
+  margin-bottom: 0.75rem;
 }
 
 .group-card-glass-badge {
@@ -1239,6 +1387,14 @@ tr.container-row-grouped:hover {
   font-size: 0.75rem;
   color: #a5f3fc;
   font-weight: 500;
+  text-align: left;
+}
+
+.group-card-stats-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
 }
 
 .group-card-glass-header .group-autostart-toggle {
@@ -1246,6 +1402,8 @@ tr.container-row-grouped:hover {
   padding: 0.4rem 0.75rem;
   white-space: nowrap;
   flex-shrink: 0;
+  flex-basis: 100%;
+  align-self: flex-start;
 }
 
 .group-card-glass-actions {
@@ -1253,6 +1411,15 @@ tr.container-row-grouped:hover {
   gap: 0.6rem;
   margin-bottom: 1.25rem;
   flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.card-collapsible {
+  display: none;
+}
+
+.group-card-glass.expanded .card-collapsible {
+  display: block;
 }
 
 .container-list-glass {
@@ -1268,10 +1435,11 @@ tr.container-row-grouped:hover {
   padding: 0.65rem;
   border-radius: 8px;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.65rem;
   border: 1px solid rgba(255, 255, 255, 0.08);
   transition: all 0.3s ease;
+  text-align: left;
 }
 
 .container-item-glass:hover {
@@ -1292,6 +1460,7 @@ tr.container-row-grouped:hover {
 .container-item-glass-details {
   flex: 1;
   min-width: 0;
+  text-align: left;
 }
 
 .container-item-glass-name {
@@ -1309,6 +1478,7 @@ tr.container-row-grouped:hover {
 .container-item-glass-actions {
   display: flex;
   gap: 0.4rem;
+  flex-wrap: wrap;
 }
 
 /* Standalone Container Card - Glassmorphism */
@@ -1349,7 +1519,7 @@ tr.container-row-grouped:hover {
 }
 
 .standalone-card-glass-name {
-  font-size: 1.15rem;
+  font-size: 1rem;
   font-weight: 600;
   margin-bottom: 0.3rem;
   color: #e8f5ff;

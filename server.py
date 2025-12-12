@@ -15,6 +15,10 @@ import subprocess
 import threading
 import uuid
 import hashlib
+import io
+import zipfile
+import tempfile
+import re
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -30,6 +34,7 @@ GROUPS_FILE = BASE_DIR / "data" / "groups.json"
 GROUP_ALIASES_FILE = BASE_DIR / "data" / "group_aliases.json"
 CONTAINER_ALIASES_FILE = BASE_DIR / "data" / "container_aliases.json"
 AUTOSTART_FILE = BASE_DIR / "data" / "autostart.json"
+DOCKERFILES_DIR = BASE_DIR / "dockerfiles"
 DOCKER_TIMEOUT = int(os.environ.get("DOCKER_TIMEOUT", "30"))
 MAX_UPLOAD_SIZE = 5 * 1024 * 1024  # 5MB max file size
 
@@ -255,6 +260,144 @@ def run_docker_command(args: List[str]) -> str:
     return completed.stdout
 
 
+def safe_filename(text: str, default: str = "container") -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", text or "").strip("-._")
+    return cleaned or default
+
+
+def inspect_container(container_id: str) -> dict:
+    """Retorna o JSON do docker inspect para um container."""
+    output = run_docker_command(["inspect", container_id])
+    parsed = json.loads(output)
+    if not parsed:
+        raise DockerCommandError(["inspect", container_id], "Inspect vazio")
+    return parsed[0]
+
+
+def ensure_dockerfiles_dir() -> Path:
+    DOCKERFILES_DIR.mkdir(parents=True, exist_ok=True)
+    return DOCKERFILES_DIR
+
+
+def container_label_from_inspect(data: dict, fallback: str = "container") -> str:
+    name = (data.get("Name") or "").lstrip("/") or data.get("Id") or fallback
+    return safe_filename(name, fallback)
+
+
+def build_run_args_from_inspect(data: dict) -> List[str]:
+    config = data.get("Config") or {}
+    host_cfg = data.get("HostConfig") or {}
+    name = (data.get("Name") or "").lstrip("/")
+    args: List[str] = ["run", "-d", "--name", name]
+
+    restart_policy = (host_cfg.get("RestartPolicy") or {}).get("Name") or ""
+    if restart_policy and restart_policy != "no":
+        args += ["--restart", restart_policy]
+
+    network_mode = host_cfg.get("NetworkMode") or ""
+    if network_mode and network_mode not in ("default", "bridge"):
+        args += ["--network", network_mode]
+
+    for bind in host_cfg.get("Binds") or []:
+        args += ["-v", bind]
+
+    port_bindings = host_cfg.get("PortBindings") or {}
+    for container_port, bindings in port_bindings.items():
+        for binding in bindings or []:
+            host_ip = binding.get("HostIp") or ""
+            host_port = binding.get("HostPort") or ""
+            if not host_port:
+                continue
+            if host_ip and host_ip not in ("0.0.0.0", ""):
+                args += ["-p", f"{host_ip}:{host_port}:{container_port}"]
+            else:
+                args += ["-p", f"{host_port}:{container_port}"]
+
+    for env in config.get("Env") or []:
+        args += ["-e", env]
+
+    if config.get("WorkingDir"):
+        args += ["-w", config["WorkingDir"]]
+
+    if config.get("User"):
+        args += ["-u", config["User"]]
+
+    image = config.get("Image") or data.get("Image") or ""
+    args.append(image)
+
+    # Entrypoint + Cmd
+    entrypoint = config.get("Entrypoint") or []
+    cmd = config.get("Cmd") or []
+    args += entrypoint + cmd
+    return args
+
+
+def build_dockerfile_from_inspect(data: dict) -> str:
+    config = data.get("Config") or {}
+    mounts = data.get("Mounts") or []
+    lines = []
+    base_image = config.get("Image") or "scratch"
+    lines.append(f"FROM {base_image}")
+
+    for env in config.get("Env") or []:
+        lines.append(f"ENV {env}")
+
+    if config.get("WorkingDir"):
+        lines.append(f"WORKDIR {config['WorkingDir']}")
+
+    exposed = config.get("ExposedPorts") or {}
+    for port in exposed.keys():
+        lines.append(f"EXPOSE {port}")
+
+    # Declarar volumes conhecidos
+    for mount in mounts:
+        if mount.get("Destination"):
+            lines.append(f"VOLUME {mount['Destination']}")
+
+    entrypoint = config.get("Entrypoint")
+    if entrypoint:
+        lines.append(f"ENTRYPOINT {json.dumps(entrypoint)}")
+
+    cmd = config.get("Cmd")
+    if cmd:
+        lines.append(f"CMD {json.dumps(cmd)}")
+
+    return "\n".join(lines) + "\n"
+
+
+def build_run_script(run_args: List[str]) -> str:
+    quoted = " ".join(shlex.quote(part) for part in run_args)
+    return "#!/usr/bin/env bash\nset -euo pipefail\n\n" f"docker {quoted}\n"
+
+
+def create_export_zip_from_inspect(data: dict, include_data: bool = False) -> bytes:
+    dockerfile = build_dockerfile_from_inspect(data)
+    run_args = build_run_args_from_inspect(data)
+    run_script = build_run_script(run_args)
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("Dockerfile", dockerfile)
+        zf.writestr("run.sh", run_script)
+        zf.writestr("inspect.json", json.dumps(data, indent=2))
+        if include_data:
+            # Exporta o filesystem do container (sem volumes externos) como rootfs.tar.gz
+            with tempfile.NamedTemporaryFile(suffix=".tar") as tmp:
+                try:
+                    run_docker_command(["export", "-o", tmp.name, container_id])
+                    with open(tmp.name, "rb") as tar_file:
+                        zf.writestr("rootfs.tar", tar_file.read())
+                except DockerCommandError as error:
+                    zf.writestr(
+                        "data-export.log",
+                        f"Falha ao exportar dados: {error.stderr}",
+                    )
+    return buffer.getvalue()
+
+
+def create_export_zip(container_id: str, include_data: bool = False) -> bytes:
+    data = inspect_container(container_id)
+    return create_export_zip_from_inspect(data, include_data)
 def set_restart_policy(container_id: str, policy: str) -> None:
     """Atualiza a restart policy de um container."""
     run_docker_command(["update", f"--restart={policy}", container_id])
@@ -431,13 +574,31 @@ class DockerControlHandler(BaseHTTPRequestHandler):
         if route == "/api/autostart":
             self._handle_get_autostart()
             return
+        if route.startswith("/api/containers/") and route.endswith("/export"):
+            self._handle_export_container(route)
+            return
+        if route.startswith("/api/groups/") and route.endswith("/export"):
+            self._handle_export_group(route)
+            return
+        if route.startswith("/api/containers/") and route.endswith("/dockerfile"):
+            self._handle_get_dockerfile(route)
+            return
         self.send_error(HTTPStatus.NOT_FOUND, "Unknown path")
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         route = parsed.path
+        if route == "/api/containers/create-from-dockerfile":
+            self._handle_create_from_dockerfile()
+            return
+        if route == "/api/containers/create-from-command":
+            self._handle_create_from_command()
+            return
         if route.startswith("/api/containers/") and route.endswith("/restart-policy"):
             self._handle_set_restart_policy(route)
+            return
+        if route.startswith("/api/containers/") and route.endswith("/dockerfile"):
+            self._handle_save_dockerfile(route)
             return
         if route.startswith("/api/containers/"):
             self._handle_container_action(route)
@@ -475,6 +636,190 @@ class DockerControlHandler(BaseHTTPRequestHandler):
         aliases = self.server.alias_store.read()
         self._send_json({"groups": groups, "aliases": aliases})
 
+    def _handle_export_container(self, route: str) -> None:
+        remainder = route[len("/api/containers/") :]
+        container_id = remainder.replace("/export", "").strip("/")
+        include_data = False
+        qs = parse_qs(urlparse(self.path).query)
+        if qs.get("includeData", ["false"])[0].lower() in ("1", "true", "yes"):
+            include_data = True
+        try:
+            data = inspect_container(container_id)
+            label = container_label_from_inspect(data, container_id)
+            payload = create_export_zip_from_inspect(data, include_data=include_data)
+        except DockerCommandError as error:
+            self._send_json({"error": str(error), "details": error.stderr}, code=500)
+            return
+
+        filename = f"{label}-export.zip"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _handle_export_group(self, route: str) -> None:
+        group_name = route[len("/api/groups/") : -len("/export")]
+        groups = self.server.group_store.read()
+        container_ids = groups.get(group_name, [])
+        if not container_ids:
+            self._send_json({"error": "Grupo vazio ou inexistente"}, code=404)
+            return
+        include_data = False
+        qs = parse_qs(urlparse(self.path).query)
+        if qs.get("includeData", ["false"])[0].lower() in ("1", "true", "yes"):
+            include_data = True
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for cid in container_ids:
+                try:
+                    data = inspect_container(cid)
+                    label = container_label_from_inspect(data, cid)
+                    payload = create_export_zip_from_inspect(data, include_data=include_data)
+                except DockerCommandError as error:
+                    zf.writestr(f"{cid}/error.txt", error.stderr or str(error))
+                    continue
+                with zipfile.ZipFile(io.BytesIO(payload)) as inner:
+                    for name in inner.namelist():
+                        zf.writestr(f"{label}/{name}", inner.read(name))
+
+        filename = f"{safe_filename(group_name, 'group')}-export.zip"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.end_headers()
+        self.wfile.write(buffer.getvalue())
+
+    def _handle_get_dockerfile(self, route: str) -> None:
+        remainder = route[len("/api/containers/") :]
+        container_id = remainder.replace("/dockerfile", "").strip("/")
+        ensure_dockerfiles_dir()
+        try:
+            data = inspect_container(container_id)
+        except DockerCommandError as error:
+            self._send_json({"error": str(error), "details": error.stderr}, code=500)
+            return
+        container_name = (data.get("Name") or container_id).lstrip("/")
+        folder = DOCKERFILES_DIR / container_name
+        folder.mkdir(parents=True, exist_ok=True)
+        dockerfile_path = folder / "Dockerfile"
+        if not dockerfile_path.exists():
+            dockerfile_content = build_dockerfile_from_inspect(data)
+            dockerfile_path.write_text(dockerfile_content)
+        else:
+            dockerfile_content = dockerfile_path.read_text()
+        self._send_json({"path": str(dockerfile_path), "content": dockerfile_content})
+
+    def _handle_save_dockerfile(self, route: str) -> None:
+        remainder = route[len("/api/containers/") :]
+        container_id = remainder.replace("/dockerfile", "").strip("/")
+        payload = self._read_json_body()
+        content = (payload or {}).get("content", "")
+        if not isinstance(content, str) or not content.strip():
+            self._send_json({"error": "Conteúdo inválido"}, code=400)
+            return
+        ensure_dockerfiles_dir()
+        try:
+            data = inspect_container(container_id)
+        except DockerCommandError as error:
+            self._send_json({"error": str(error), "details": error.stderr}, code=500)
+            return
+
+        container_name = (data.get("Name") or container_id).lstrip("/")
+        folder = DOCKERFILES_DIR / container_name
+        folder.mkdir(parents=True, exist_ok=True)
+        dockerfile_path = folder / "Dockerfile"
+        dockerfile_path.write_text(content)
+
+        # Opcional: reconstruir imagem e reiniciar container
+        image_tag = (data.get("Config") or {}).get("Image") or container_name
+        try:
+            run_docker_command(["build", "-t", image_tag, str(folder)])
+        except DockerCommandError as error:
+            self._send_json({"error": "Falha ao buildar imagem", "details": error.stderr}, code=500)
+            return
+
+        try:
+            run_docker_command(["stop", container_id])
+        except DockerCommandError:
+            pass
+
+        # Recria o container com os mesmos argumentos (run)
+        run_args = build_run_args_from_inspect(data)
+        try:
+            idx = run_args.index(image_tag)
+            run_args[idx] = image_tag
+        except ValueError:
+            pass
+        try:
+            # Remove existente se sobrou
+            run_docker_command(["rm", container_id])
+        except DockerCommandError:
+            pass
+        try:
+            run_docker_command(run_args)
+        except DockerCommandError as error:
+            self._send_json({"error": "Falha ao recriar container", "details": error.stderr}, code=500)
+            return
+
+        self._send_json({"path": str(dockerfile_path), "status": "saved"})
+
+    def _handle_create_from_dockerfile(self) -> None:
+        payload = self._read_json_body()
+        name = (payload or {}).get("name", "").strip()
+        dockerfile = (payload or {}).get("dockerfile", "").strip()
+        cmd = (payload or {}).get("command", "").strip()
+        env_file = (payload or {}).get("env", "")
+        extra_files = payload.get("files", []) if isinstance(payload, dict) else []
+        if not name or not dockerfile:
+            self._send_json({"error": "Nome e Dockerfile são obrigatórios"}, code=400)
+            return
+        ensure_dockerfiles_dir()
+        folder = DOCKERFILES_DIR / name
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "Dockerfile").write_text(dockerfile)
+        if env_file:
+            (folder / ".env").write_text(env_file)
+        for file_entry in extra_files:
+            fname = file_entry.get("name")
+            content = file_entry.get("content", "")
+            if fname:
+                target = folder / fname
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
+
+        image_tag = f"{name}:latest"
+        try:
+            run_docker_command(["build", "-t", image_tag, str(folder)])
+            run_cmd = ["run", "-d", "--name", name]
+            if env_file:
+                run_cmd += ["--env-file", str(folder / ".env")]
+            run_cmd.append(image_tag)
+            if cmd:
+                run_cmd += shlex.split(cmd)
+            run_docker_command(run_cmd)
+        except DockerCommandError as error:
+            self._send_json({"error": "Falha ao criar container", "details": error.stderr}, code=500)
+            return
+        self._send_json({"status": "created", "name": name})
+
+    def _handle_create_from_command(self) -> None:
+        payload = self._read_json_body()
+        command = (payload or {}).get("command", "").strip()
+        if not command:
+            self._send_json({"error": "Comando é obrigatório"}, code=400)
+            return
+        # Remove prefixo "docker" se o usuário incluir
+        parts = shlex.split(command)
+        if parts and parts[0] == "docker":
+            parts = parts[1:]
+        try:
+            run_docker_command(parts)
+        except DockerCommandError as error:
+            self._send_json({"error": "Falha ao executar comando", "details": error.stderr}, code=500)
+            return
+        self._send_json({"status": "executed"})
     def _handle_save_groups(self) -> None:
         payload = self._read_json_body()
         if not isinstance(payload, dict) or "groups" not in payload:
@@ -521,6 +866,7 @@ class DockerControlHandler(BaseHTTPRequestHandler):
             "start": ["start", container_id],
             "stop": ["stop", container_id],
             "restart": ["restart", container_id],
+            "delete": ["rm", "-f", container_id],
         }
 
         docker_args = command_map.get(action)
